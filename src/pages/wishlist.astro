@@ -1,0 +1,150 @@
+---
+import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import FormatBadge from '../components/FormatBadge.astro';
+import Poster from '../components/Poster.astro';
+import { db } from '../db/client';
+import { copies, movies, wishlistItems } from '../db/schema';
+import { addToWishlist, removeWishlistItem } from '../lib/collection';
+import { backWithQuery, int, str, targetOf } from '../lib/forms';
+import { bestOwned, TARGET_LABEL } from '../lib/formats';
+import Layout from '../layouts/Layout.astro';
+
+const isAdmin = Astro.locals.user?.role === 'admin';
+
+if (Astro.request.method === 'POST' && isAdmin) {
+  const form = await Astro.request.formData();
+  const item = db
+    .select()
+    .from(wishlistItems)
+    .where(eq(wishlistItems.id, int(form, 'item_id') ?? -1))
+    .get();
+  if (!item) return backWithQuery(Astro.url, { err: 'Unknown wishlist item.' });
+  if (str(form, '_action') === 'remove') {
+    removeWishlistItem(item.id);
+    return backWithQuery(Astro.url, { ok: 'Removed.' });
+  }
+  const target = targetOf(form) ?? item.targetFormat;
+  const res = addToWishlist(item.movieId, target, { priority: int(form, 'priority') ?? item.priority, notes: str(form, 'notes') || null });
+  return backWithQuery(Astro.url, res.ok ? { ok: 'Saved.' } : { err: res.reason });
+}
+
+const open = db
+  .select({ item: wishlistItems, movie: movies })
+  .from(wishlistItems)
+  .innerJoin(movies, eq(movies.id, wishlistItems.movieId))
+  .where(isNull(wishlistItems.fulfilledAt))
+  .all();
+const ownedCopies = db.select().from(copies).where(and(eq(copies.ownership, 'owned'), eq(copies.reviewStatus, 'confirmed'))).all();
+const bestOwnedFor = (movieId: number) => bestOwned(ownedCopies.filter((c) => c.movieId === movieId));
+
+const tab = Astro.url.searchParams.get('tab') === 'upgrade' ? 'upgrade' : Astro.url.searchParams.get('tab') === 'done' ? 'done' : 'new';
+const byPriority = (a: (typeof open)[number], b: (typeof open)[number]) =>
+  a.item.priority - b.item.priority || a.movie.title.localeCompare(b.movie.title);
+const newItems = open.filter((r) => r.item.kind === 'new').sort(byPriority);
+const upgradeItems = open.filter((r) => r.item.kind === 'upgrade').sort(byPriority);
+const done =
+  tab === 'done'
+    ? db
+        .select({ item: wishlistItems, movie: movies })
+        .from(wishlistItems)
+        .innerJoin(movies, eq(movies.id, wishlistItems.movieId))
+        .where(isNotNull(wishlistItems.fulfilledAt))
+        .orderBy(desc(wishlistItems.fulfilledAt))
+        .limit(100)
+        .all()
+    : [];
+const rows = tab === 'new' ? newItems : tab === 'upgrade' ? upgradeItems : done;
+const priorityLabel = ['', 'High', 'Normal', 'Low'];
+const tabs = [
+  { key: 'new', label: 'New movies', count: newItems.length },
+  { key: 'upgrade', label: 'Upgrades', count: upgradeItems.length },
+  { key: 'done', label: 'Fulfilled', count: null },
+];
+---
+
+<Layout title="Wishlist">
+  <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">Wishlist</h1>
+      <p class="mt-1 text-sm text-ink-400">
+        <span class="chip bg-blue-600 text-white">BD ok</span> = Blu-ray or better is fine ·
+        <span class="chip bg-accent text-ink-950">4K only</span> = only a 4K UHD will do
+      </p>
+    </div>
+    {isAdmin && <a href="/add" class="btn">+ Add movie</a>}
+  </div>
+
+  <div class="mb-5 flex gap-1 border-b border-ink-800">
+    {
+      tabs.map((t) => (
+        <a
+          href={t.key === 'new' ? '/wishlist' : `/wishlist?tab=${t.key}`}
+          class:list={['-mb-px border-b-2 px-3 py-2 text-sm', tab === t.key ? 'border-accent text-white' : 'border-transparent text-ink-400 hover:text-white']}
+        >
+          {t.label} {t.count !== null && <span class="text-ink-500">{t.count}</span>}
+        </a>
+      ))
+    }
+  </div>
+
+  {rows.length === 0 && <p class="card p-8 text-center text-ink-400">Nothing here.</p>}
+
+  <ul class="space-y-2">
+    {
+      rows.map(({ item, movie }) => {
+        const have = bestOwnedFor(movie.id);
+        return (
+          <li class="card flex items-center gap-3 p-2.5 sm:gap-4 sm:p-3">
+            <a href={`/movie/${movie.tmdbId}`} class="w-12 shrink-0 sm:w-14">
+              <Poster path={movie.posterPath} title={movie.title} size="w185" />
+            </a>
+            <div class="min-w-0 flex-1">
+              <a href={`/movie/${movie.tmdbId}`} class="block truncate font-medium hover:text-accent">
+                {movie.title} <span class="font-normal text-ink-400">{movie.year}</span>
+              </a>
+              <div class="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-ink-400">
+                {item.targetFormat === 'uhd' ? <span class="chip bg-accent text-ink-950">4K only</span> : <span class="chip bg-blue-600 text-white">BD ok</span>}
+                {item.kind === 'upgrade' && have && (
+                  <span class="inline-flex items-center gap-1">
+                    have <FormatBadge format={have} />
+                  </span>
+                )}
+                {tab !== 'done' && item.priority !== 2 && (
+                  <span class:list={[item.priority === 1 ? 'text-rose-300' : 'text-ink-500']}>{priorityLabel[item.priority]} priority</span>
+                )}
+                {item.notes && <span class="truncate">· {item.notes}</span>}
+                {item.fulfilledAt && <span>Fulfilled {item.fulfilledAt.toLocaleDateString('en-GB')}</span>}
+              </div>
+            </div>
+            {
+              isAdmin && tab !== 'done' && (
+                <details class="relative shrink-0">
+                  <summary class="btn btn-sm list-none">Edit</summary>
+                  <div class="card absolute right-0 z-10 mt-1 w-72 space-y-2 p-3 shadow-xl">
+                    <form method="post" class="space-y-2">
+                      <input type="hidden" name="item_id" value={item.id} />
+                      <select name="target" class="w-full">
+                        <option value="bluray" selected={item.targetFormat === 'bluray'}>{TARGET_LABEL.bluray}</option>
+                        <option value="uhd" selected={item.targetFormat === 'uhd'}>{TARGET_LABEL.uhd}</option>
+                      </select>
+                      <select name="priority" class="w-full">
+                        {[1, 2, 3].map((p) => <option value={p} selected={item.priority === p}>{priorityLabel[p]} priority</option>)}
+                      </select>
+                      <input name="notes" value={item.notes ?? ''} placeholder="Notes" class="w-full" />
+                      <button class="btn btn-primary w-full">Save</button>
+                    </form>
+                    <form method="post">
+                      <input type="hidden" name="item_id" value={item.id} />
+                      <input type="hidden" name="_action" value="remove" />
+                      <button class="btn btn-danger w-full">Remove from wishlist</button>
+                    </form>
+                  </div>
+                </details>
+              )
+            }
+          </li>
+        );
+      })
+    }
+  </ul>
+</Layout>

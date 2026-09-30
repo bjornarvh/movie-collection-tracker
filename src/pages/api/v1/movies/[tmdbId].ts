@@ -4,6 +4,7 @@ import { db } from '../../../../db/client';
 import { files } from '../../../../db/schema';
 import { findMovieByTmdb, loadLibrary } from '../../../../lib/collection';
 import { bestOwned } from '../../../../lib/formats';
+import { countsAsOwned } from '../../../../lib/wishlist';
 import { json } from '../_json';
 
 /** What you have of a movie, e.g. for triage to warn "you already own this on 4K". */
@@ -17,7 +18,8 @@ export const GET: APIRoute = ({ params }) => {
     title: movie.title,
     year: movie.year,
     in_collection: entry.copies.length > 0,
-    best_owned_format: bestOwned(entry.copies),
+    // Only confirmed copies count, same as wishlist fulfilment.
+    best_owned_format: bestOwned(entry.copies.filter(countsAsOwned)),
     copies: entry.copies.map((c) => ({
       id: c.id,
       format: c.format,

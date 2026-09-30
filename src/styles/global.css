@@ -23,6 +23,7 @@
   }
   input[type="checkbox"] { @apply h-4 w-4 accent-amber-400 p-0; }
   label { @apply text-sm text-ink-300; }
+  kbd { @apply rounded border border-ink-700 bg-ink-800 px-1 font-mono text-[10px] text-ink-300; }
 }
 
 @layer components {

@@ -62,7 +62,9 @@ const active = (href: string) => (href === '/' ? path === '/' || path.startsWith
                 >
                   {n.label}
                   {'badge' in n && n.badge ? (
-                    <span class="rounded-full bg-accent px-1.5 text-[11px] font-bold text-ink-950">{n.badge}</span>
+                    <span class="rounded-full bg-accent px-1.5 text-[11px] font-bold text-ink-950" data-review-badge>
+                      {n.badge}
+                    </span>
                   ) : null}
                 </a>
               ))}

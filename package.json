@@ -13,7 +13,8 @@
     "start": "node ./dist/server/entry.mjs",
     "astro": "astro",
     "test": "vitest run",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "check": "astro check"
   },
   "allowScripts": {
     "esbuild": true,
@@ -31,10 +32,11 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@astrojs/check": "^0.9.10",
     "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^26.6.3",
     "drizzle-kit": "^0.31.11",
-    "typescript": "^7.0.2",
+    "typescript": "^6.0.3",
     "vitest": "^5.0.2"
   }
 }

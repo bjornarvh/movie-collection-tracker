@@ -1,0 +1,115 @@
+---
+import FormatBadge from '../components/FormatBadge.astro';
+import Poster from '../components/Poster.astro';
+import { addToWishlist, loadLibrary, type LibraryEntry } from '../lib/collection';
+import { backWithQuery, int, targetOf } from '../lib/forms';
+import { bestFormat, bestOwned, TARGET_LABEL } from '../lib/formats';
+import { countsAsOwned } from '../lib/wishlist';
+import Layout from '../layouts/Layout.astro';
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const movieId = int(form, 'movie_id');
+  const target = targetOf(form);
+  if (!movieId || !target) return backWithQuery(Astro.url, { err: 'Invalid request.' });
+  const res = addToWishlist(movieId, target);
+  return backWithQuery(Astro.url, res.ok ? { ok: `Added to wishlist (${TARGET_LABEL[target]}).` } : { err: res.reason });
+}
+
+const library = loadLibrary().filter((m) => m.copies.length);
+const confirmedOwned = (m: LibraryEntry) => bestOwned(m.copies.filter(countsAsOwned));
+
+const lists = {
+  dvd: {
+    title: 'DVD only',
+    blurb: 'Your best legit copy is a DVD.',
+    rows: library.filter((m) => confirmedOwned(m) === 'dvd' || (confirmedOwned(m) === 'digital' && m.copies.some((c) => c.format === 'dvd' && countsAsOwned(c)))),
+  },
+  pirated: {
+    title: 'No legit copy',
+    blurb: 'Only pirated or unverified copies. Buy it?',
+    rows: library.filter((m) => !confirmedOwned(m) && m.copies.some((c) => c.ownership === 'pirated')),
+  },
+  bluray: {
+    title: 'Blu-ray → 4K',
+    blurb: 'Owned on Blu-ray; a 4K UHD would be an upgrade.',
+    rows: library.filter((m) => confirmedOwned(m) === 'bluray'),
+  },
+  digital: {
+    title: 'Digital only',
+    blurb: 'Best legit copy is a digital purchase.',
+    rows: library.filter((m) => confirmedOwned(m) === 'digital'),
+  },
+} as const;
+type Key = keyof typeof lists;
+
+const tabParam = Astro.url.searchParams.get('tab') as Key | null;
+const tab: Key = tabParam && tabParam in lists ? tabParam : 'dvd';
+const hideWished = Astro.url.searchParams.get('all') !== '1';
+const current = lists[tab];
+const rows = current.rows.filter((m) => !hideWished || !m.wish);
+const unreviewed = library.filter((m) => m.copies.some((c) => c.reviewStatus === 'needs_review')).length;
+---
+
+<Layout title="Upgrades">
+  <h1 class="mb-1 text-2xl font-semibold tracking-tight">Upgrade candidates</h1>
+  <p class="mb-5 text-sm text-ink-400">
+    Only confirmed copies count as owned.
+    {unreviewed > 0 && <a class="text-accent underline" href="/review">{unreviewed} movies still need review.</a>}
+  </p>
+
+  <div class="mb-4 flex flex-wrap gap-1 border-b border-ink-800">
+    {
+      (Object.keys(lists) as Key[]).map((k) => (
+        <a
+          href={`/upgrades?tab=${k}`}
+          class:list={['-mb-px border-b-2 px-3 py-2 text-sm', tab === k ? 'border-accent text-white' : 'border-transparent text-ink-400 hover:text-white']}
+        >
+          {lists[k].title} <span class="text-ink-500">{lists[k].rows.filter((m) => !m.wish).length}</span>
+        </a>
+      ))
+    }
+  </div>
+
+  <div class="mb-4 flex flex-wrap items-center justify-between gap-2 text-sm text-ink-400">
+    <p>{current.blurb}</p>
+    <a class="underline" href={`/upgrades?tab=${tab}${hideWished ? '&all=1' : ''}`}>{hideWished ? 'Show ones already on the wishlist' : 'Hide wished'}</a>
+  </div>
+
+  {rows.length === 0 && <p class="card p-8 text-center text-ink-400">Nothing here. 🎉</p>}
+
+  <ul class="grid gap-2 md:grid-cols-2">
+    {
+      rows.map((m) => {
+        const best = bestFormat(m.copies);
+        return (
+          <li class="card flex items-center gap-3 p-2.5">
+            <a href={`/movie/${m.tmdbId}`} class="w-12 shrink-0">
+              <Poster path={m.posterPath} title={m.title} size="w185" />
+            </a>
+            <div class="min-w-0 flex-1">
+              <a href={`/movie/${m.tmdbId}`} class="block truncate font-medium hover:text-accent">
+                {m.title} <span class="font-normal text-ink-400">{m.year}</span>
+              </a>
+              <div class="mt-1 flex items-center gap-1.5 text-xs text-ink-400">
+                {best && <FormatBadge format={best} />}
+                {m.wish && <span class="text-rose-300">♥ wished ({m.wish.targetFormat === 'uhd' ? '4K' : 'BD+'})</span>}
+              </div>
+            </div>
+            <form method="post" class="flex shrink-0 gap-1">
+              <input type="hidden" name="movie_id" value={m.id} />
+              {tab !== 'bluray' && (
+                <button class="btn btn-sm" name="target" value="bluray" title="Wish: Blu-ray is enough">
+                  ♥ BD
+                </button>
+              )}
+              <button class="btn btn-sm" name="target" value="uhd" title="Wish: 4K only">
+                ♥ 4K
+              </button>
+            </form>
+          </li>
+        );
+      })
+    }
+  </ul>
+</Layout>

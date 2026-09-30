@@ -1,0 +1,22 @@
+---
+import { posterUrl } from '../lib/formats';
+
+interface Props {
+  path: string | null;
+  title: string;
+  size?: 'w185' | 'w342' | 'w500';
+  class?: string;
+}
+const { path, title, size = 'w342', class: cls } = Astro.props;
+const src = posterUrl(path, size);
+---
+
+<div class:list={['relative aspect-[2/3] overflow-hidden rounded-lg bg-ink-800', cls]}>
+  {
+    src ? (
+      <img src={src} alt={`Poster for ${title}`} loading="lazy" decoding="async" class="h-full w-full object-cover" />
+    ) : (
+      <div class="grid h-full w-full place-items-center p-2 text-center text-xs text-ink-400">{title}</div>
+    )
+  }
+</div>

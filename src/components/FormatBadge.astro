@@ -1,0 +1,18 @@
+---
+import type { Format } from '../db/schema';
+import { FORMAT_LABEL } from '../lib/formats';
+
+interface Props {
+  format: Format;
+  class?: string;
+}
+const { format, class: cls } = Astro.props;
+const colors: Record<Format, string> = {
+  dvd: 'bg-slate-600/80 text-slate-100',
+  digital: 'bg-sky-700/80 text-sky-50',
+  bluray: 'bg-blue-600 text-white',
+  uhd: 'bg-accent text-ink-950',
+};
+---
+
+<span class:list={['chip', colors[format], cls]}>{FORMAT_LABEL[format]}</span>

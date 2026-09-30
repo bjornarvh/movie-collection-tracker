@@ -1,0 +1,219 @@
+---
+import FormatBadge from '../components/FormatBadge.astro';
+import OwnershipBadge from '../components/OwnershipBadge.astro';
+import Poster from '../components/Poster.astro';
+import type { Format } from '../db/schema';
+import { loadLibrary, type LibraryEntry } from '../lib/collection';
+import { bestFormat, bestOwned, FORMAT_LABEL, FORMAT_RANK } from '../lib/formats';
+import Layout from '../layouts/Layout.astro';
+
+const isAdmin = Astro.locals.user?.role === 'admin';
+const qp = Astro.url.searchParams;
+const q = qp.get('q')?.trim() ?? '';
+const format = qp.get('format') ?? '';
+const ownership = isAdmin ? (qp.get('ownership') ?? '') : '';
+const hdr = qp.get('hdr') ?? '';
+const flag = qp.get('flag') ?? '';
+const sort = qp.get('sort') ?? 'title';
+const view = qp.get('view') === 'table' ? 'table' : 'grid';
+
+const library = loadLibrary();
+
+// Guests see "in collection" without the pirated/owned distinction.
+const best = (m: LibraryEntry) => bestFormat(m.copies);
+const ownershipOf = (m: LibraryEntry) =>
+  m.copies.some((c) => c.ownership === 'owned') ? 'owned' : m.copies.some((c) => c.ownership === 'pirated') ? 'pirated' : 'unverified';
+
+const norm = (s: string) => s.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+const nq = norm(q);
+
+let rows = library.filter((m) => m.copies.length > 0);
+if (flag === 'wishlist') rows = library.filter((m) => m.wish);
+if (nq) rows = rows.filter((m) => norm(`${m.title} ${m.originalTitle ?? ''} ${m.year ?? ''}`).includes(nq));
+if (format) rows = rows.filter((m) => m.copies.some((c) => c.format === format));
+if (format === 'best-dvd') rows = library.filter((m) => best(m) === 'dvd');
+if (ownership === 'owned') rows = rows.filter((m) => m.copies.some((c) => c.ownership === 'owned'));
+if (ownership === 'pirated-only') rows = rows.filter((m) => m.copies.length && m.copies.every((c) => c.ownership === 'pirated'));
+if (ownership === 'unverified') rows = rows.filter((m) => m.copies.some((c) => c.ownership === 'unverified'));
+if (hdr === 'hdr') rows = rows.filter((m) => m.hdr !== 'none');
+if (hdr === 'dv') rows = rows.filter((m) => m.hdr === 'dv');
+if (flag === 'review') rows = rows.filter((m) => m.copies.some((c) => c.reviewStatus === 'needs_review'));
+if (flag === 'edition') rows = rows.filter((m) => m.copies.some((c) => c.edition));
+if (flag === 'nofile') rows = rows.filter((m) => m.fileCount === 0);
+
+const sorters: Record<string, (a: LibraryEntry, b: LibraryEntry) => number> = {
+  title: (a, b) => a.title.localeCompare(b.title),
+  year: (a, b) => (b.year ?? 0) - (a.year ?? 0) || a.title.localeCompare(b.title),
+  added: (a, b) => b.createdAt.getTime() - a.createdAt.getTime(),
+  format: (a, b) => (FORMAT_RANK[best(b) ?? 'dvd'] ?? 0) - (FORMAT_RANK[best(a) ?? 'dvd'] ?? 0) || a.title.localeCompare(b.title),
+};
+rows = [...rows].sort(sorters[sort] ?? sorters.title);
+
+const owned = library.filter((m) => m.copies.length);
+const counts = {
+  movies: owned.length,
+  uhd: owned.filter((m) => best(m) === 'uhd').length,
+  bluray: owned.filter((m) => best(m) === 'bluray').length,
+  dvd: owned.filter((m) => best(m) === 'dvd').length,
+  digital: owned.filter((m) => best(m) === 'digital').length,
+  pirated: owned.filter((m) => !bestOwned(m.copies)).length,
+  wishlist: library.filter((m) => m.wish).length,
+};
+
+const link = (changes: Record<string, string>) => {
+  const u = new URLSearchParams(qp);
+  u.delete('ok');
+  u.delete('err');
+  for (const [k, v] of Object.entries(changes)) v ? u.set(k, v) : u.delete(k);
+  const s = u.toString();
+  return s ? `/?${s}` : '/';
+};
+---
+
+<Layout title="Collection" wide>
+  <div class="mb-5 flex flex-wrap items-end justify-between gap-4">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">Collection</h1>
+      <p class="mt-1 text-sm text-ink-400">
+        {counts.movies} movies · {counts.uhd} 4K · {counts.bluray} Blu-ray · {counts.dvd} DVD
+        {counts.digital > 0 && ` · ${counts.digital} digital`}
+        {isAdmin && ` · ${counts.pirated} without a legit copy`}
+        · <a class="underline decoration-ink-600 underline-offset-2 hover:text-white" href="/wishlist">{counts.wishlist} wished</a>
+      </p>
+    </div>
+    <div class="flex gap-1 rounded-lg border border-ink-800 p-0.5 text-sm">
+      <a href={link({ view: '' })} class:list={['rounded-md px-2.5 py-1', view === 'grid' ? 'bg-ink-800' : 'text-ink-400']}>Posters</a>
+      <a href={link({ view: 'table' })} class:list={['rounded-md px-2.5 py-1', view === 'table' ? 'bg-ink-800' : 'text-ink-400']}>Table</a>
+    </div>
+  </div>
+
+  <form method="get" class="card mb-6 flex flex-wrap items-center gap-2 p-3">
+    <input type="search" name="q" value={q} placeholder="Search title or year…" class="min-w-48 flex-1" />
+    <select name="format" aria-label="Format">
+      <option value="">Any format</option>
+      {(['uhd', 'bluray', 'digital', 'dvd'] as Format[]).map((f) => <option value={f} selected={format === f}>Has {FORMAT_LABEL[f]}</option>)}
+      <option value="best-dvd" selected={format === 'best-dvd'}>Best is DVD</option>
+    </select>
+    {
+      isAdmin && (
+        <select name="ownership" aria-label="Ownership">
+          <option value="">Owned or not</option>
+          <option value="owned" selected={ownership === 'owned'}>Has owned copy</option>
+          <option value="pirated-only" selected={ownership === 'pirated-only'}>Pirated only</option>
+          <option value="unverified" selected={ownership === 'unverified'}>Unverified</option>
+        </select>
+      )
+    }
+    <select name="hdr" aria-label="HDR">
+      <option value="">Any HDR</option>
+      <option value="hdr" selected={hdr === 'hdr'}>HDR / DV</option>
+      <option value="dv" selected={hdr === 'dv'}>Dolby Vision</option>
+    </select>
+    <select name="flag" aria-label="Other">
+      <option value="">All</option>
+      <option value="wishlist" selected={flag === 'wishlist'}>On wishlist</option>
+      <option value="edition" selected={flag === 'edition'}>Special editions</option>
+      {isAdmin && <option value="review" selected={flag === 'review'}>Needs review</option>}
+      {isAdmin && <option value="nofile" selected={flag === 'nofile'}>Not in Plex</option>}
+    </select>
+    <select name="sort" aria-label="Sort">
+      <option value="title" selected={sort === 'title'}>Title</option>
+      <option value="year" selected={sort === 'year'}>Newest</option>
+      <option value="added" selected={sort === 'added'}>Recently added</option>
+      <option value="format" selected={sort === 'format'}>Best format</option>
+    </select>
+    {view === 'table' && <input type="hidden" name="view" value="table" />}
+    <button class="btn btn-primary" type="submit">Filter</button>
+    {qp.size > 0 && <a class="btn" href="/">Reset</a>}
+  </form>
+
+  {rows.length === 0 && (
+    <div class="card p-10 text-center text-ink-400">
+      {library.length === 0 ? (
+        isAdmin ? (
+          <p>
+            Nothing here yet. <a class="text-accent underline" href="/settings">Scan Plex</a> or <a class="text-accent underline" href="/add">add a movie</a>.
+          </p>
+        ) : (
+          <p>The collection is empty.</p>
+        )
+      ) : (
+        <p>No movies match these filters.</p>
+      )}
+    </div>
+  )}
+
+  {
+    view === 'grid' ? (
+      <div class="grid grid-cols-3 gap-x-3 gap-y-5 sm:grid-cols-4 md:grid-cols-6 lg:grid-cols-7 xl:grid-cols-8 2xl:grid-cols-10">
+        {rows.map((m) => {
+          const b = best(m);
+          return (
+            <a href={`/movie/${m.tmdbId}`} class="group block">
+              <div class="relative">
+                <Poster path={m.posterPath} title={m.title} class="ring-1 ring-ink-800 transition group-hover:ring-2 group-hover:ring-accent" />
+                <div class="absolute bottom-1.5 left-1.5 flex flex-wrap gap-1">
+                  {b && <FormatBadge format={b} class="shadow" />}
+                  {m.hdr === 'dv' && <span class="chip bg-black/80 text-white shadow">DV</span>}
+                  {m.hdr === 'hdr10' && <span class="chip bg-black/80 text-white shadow">HDR</span>}
+                </div>
+                {m.wish && (
+                  <span class="absolute right-1.5 top-1.5 chip bg-rose-600 text-white shadow" title="On wishlist">
+                    ♥ {m.wish.targetFormat === 'uhd' ? '4K' : 'BD'}
+                  </span>
+                )}
+                {isAdmin && m.copies.length > 0 && !bestOwned(m.copies) && (
+                  <span
+                    class:list={['absolute left-1.5 top-1.5 h-2.5 w-2.5 rounded-full ring-2 ring-black/60', ownershipOf(m) === 'pirated' ? 'bg-fuchsia-500' : 'bg-ink-400']}
+                    title={ownershipOf(m) === 'pirated' ? 'Pirated only' : 'Unverified'}
+                  />
+                )}
+              </div>
+              <p class="mt-1.5 truncate text-sm font-medium group-hover:text-white" title={m.title}>{m.title}</p>
+              <p class="text-xs text-ink-400">{m.year}</p>
+            </a>
+          );
+        })}
+      </div>
+    ) : (
+      rows.length > 0 && (
+        <div class="card overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th>Title</th>
+                <th>Year</th>
+                <th>Copies</th>
+                <th>HDR</th>
+                <th>Wishlist</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((m) => (
+                <tr class="hover:bg-ink-850">
+                  <td>
+                    <a class="font-medium hover:text-accent" href={`/movie/${m.tmdbId}`}>{m.title}</a>
+                  </td>
+                  <td class="text-ink-400">{m.year}</td>
+                  <td>
+                    <div class="flex flex-wrap items-center gap-1">
+                      {m.copies.map((c) => (
+                        <span class="inline-flex items-center gap-1">
+                          <FormatBadge format={c.format} />
+                          {isAdmin && <OwnershipBadge ownership={c.ownership} review={c.reviewStatus === 'needs_review'} />}
+                          {c.edition && <span class="text-xs text-ink-400">{c.edition}</span>}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                  <td class="text-xs text-ink-300">{m.hdr === 'dv' ? 'Dolby Vision' : m.hdr === 'hdr10' ? 'HDR10' : ''}</td>
+                  <td class="text-xs">{m.wish && <span class="text-rose-300">♥ {m.wish.targetFormat === 'uhd' ? '4K' : 'Blu-ray+'}</span>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
+    )
+  }
+</Layout>

@@ -1,0 +1,19 @@
+---
+import type { Ownership } from '../db/schema';
+import { OWNERSHIP_LABEL } from '../lib/formats';
+
+interface Props {
+  ownership: Ownership;
+  review?: boolean;
+}
+const { ownership, review } = Astro.props;
+const colors: Record<Ownership, string> = {
+  owned: 'bg-emerald-900/70 text-emerald-200',
+  pirated: 'bg-fuchsia-900/70 text-fuchsia-200',
+  unverified: 'bg-ink-700 text-ink-300',
+};
+---
+
+<span class:list={['chip', colors[ownership]]}>
+  {OWNERSHIP_LABEL[ownership]}{review && ' ?'}
+</span>

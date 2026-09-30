@@ -1,0 +1,87 @@
+---
+import '../styles/global.css';
+import { reviewCount } from '../lib/collection';
+
+interface Props {
+  title: string;
+  wide?: boolean;
+}
+
+const { title, wide = false } = Astro.props;
+const user = Astro.locals.user;
+const isAdmin = user?.role === 'admin';
+const path = Astro.url.pathname;
+const pending = isAdmin ? reviewCount() : 0;
+const ok = Astro.url.searchParams.get('ok');
+const err = Astro.url.searchParams.get('err');
+
+const nav = [
+  { href: '/', label: 'Collection' },
+  { href: '/wishlist', label: 'Wishlist' },
+  ...(isAdmin
+    ? [
+        { href: '/upgrades', label: 'Upgrades' },
+        { href: '/review', label: 'Review', badge: pending },
+        { href: '/add', label: 'Add' },
+        { href: '/settings', label: 'Settings' },
+      ]
+    : []),
+];
+const active = (href: string) => (href === '/' ? path === '/' || path.startsWith('/movie/') : path.startsWith(href));
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0b0d12" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <title>{title} · Movie Shelf</title>
+  </head>
+  <body class="min-h-screen">
+    {
+      user && (
+        <header class="sticky top-0 z-20 border-b border-ink-800 bg-ink-950/90 backdrop-blur">
+          <div class="mx-auto flex max-w-7xl items-center gap-4 px-4 py-2.5">
+            <a href="/" class="flex shrink-0 items-center gap-2 font-semibold tracking-tight">
+              <span class="grid h-7 w-7 place-items-center rounded-md bg-accent text-ink-950">▶</span>
+              <span class="hidden sm:inline">Movie Shelf</span>
+            </a>
+            <nav class="-mx-1 flex min-w-0 flex-1 gap-1 overflow-x-auto">
+              {nav.map((n) => (
+                <a
+                  href={n.href}
+                  class:list={[
+                    'flex shrink-0 items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm transition',
+                    active(n.href) ? 'bg-ink-800 text-white' : 'text-ink-300 hover:bg-ink-850 hover:text-white',
+                  ]}
+                >
+                  {n.label}
+                  {'badge' in n && n.badge ? (
+                    <span class="rounded-full bg-accent px-1.5 text-[11px] font-bold text-ink-950">{n.badge}</span>
+                  ) : null}
+                </a>
+              ))}
+            </nav>
+            <form method="post" action="/logout" class="flex shrink-0 items-center gap-2">
+              <span class="hidden text-xs text-ink-400 md:inline">
+                {user.username}
+                {!isAdmin && ' (guest)'}
+              </span>
+              <button class="btn btn-sm" type="submit">Log out</button>
+            </form>
+          </div>
+        </header>
+      )
+    }
+    <main class:list={['mx-auto px-4 py-6', wide ? 'max-w-[1600px]' : 'max-w-7xl']}>
+      {ok && <div class="mb-4 rounded-lg border border-emerald-800 bg-emerald-950/50 px-4 py-2.5 text-sm text-emerald-200">{ok}</div>}
+      {err && <div class="mb-4 rounded-lg border border-red-800 bg-red-950/50 px-4 py-2.5 text-sm text-red-200">{err}</div>}
+      <slot />
+    </main>
+  </body>
+</html>

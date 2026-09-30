@@ -1,0 +1,368 @@
+---
+import { and, desc, eq } from 'drizzle-orm';
+import FormatBadge from '../../components/FormatBadge.astro';
+import OwnershipBadge from '../../components/OwnershipBadge.astro';
+import Poster from '../../components/Poster.astro';
+import { db } from '../../db/client';
+import { copies, FORMATS, files, movies, OWNERSHIPS, wishlistItems } from '../../db/schema';
+import {
+  addCopy,
+  addToWishlist,
+  deleteCopy,
+  findMovieByTmdb,
+  movieCopies,
+  refreshMovie,
+  removeWishlistItem,
+  updateCopy,
+} from '../../lib/collection';
+import { back, formatOf, int, ownershipOf, str, targetOf } from '../../lib/forms';
+import { FORMAT_LABEL, formatBytes, OWNERSHIP_LABEL, posterUrl, resolutionLabel, TARGET_LABEL } from '../../lib/formats';
+import Layout from '../../layouts/Layout.astro';
+
+const tmdbId = Number(Astro.params.tmdbId);
+const movie = Number.isInteger(tmdbId) ? findMovieByTmdb(tmdbId) : undefined;
+if (!movie) return new Response('Not found', { status: 404 });
+
+const isAdmin = Astro.locals.user?.role === 'admin';
+const url = Astro.url;
+
+if (Astro.request.method === 'POST' && isAdmin) {
+  const form = await Astro.request.formData();
+  const action = str(form, '_action');
+  const copyId = int(form, 'copy_id');
+  const ownsCopy = (id: number | null) => id !== null && db.select().from(copies).where(and(eq(copies.id, id), eq(copies.movieId, movie.id))).get();
+
+  if (action === 'add_copy') {
+    const format = formatOf(form);
+    const ownership = ownershipOf(form) ?? 'owned';
+    if (!format) return back(url, { err: 'Pick a format.' });
+    const { fulfilled } = addCopy(movie.id, {
+      format,
+      ownership,
+      edition: str(form, 'edition') || null,
+      notes: str(form, 'notes') || null,
+      origin: 'manual',
+      reviewStatus: 'confirmed',
+    });
+    return back(url, { ok: `Added ${FORMAT_LABEL[format]} copy.${fulfilled.length ? ' Wishlist item fulfilled 🎉' : ''}` });
+  }
+  if (action === 'update_copy' && ownsCopy(copyId)) {
+    const format = formatOf(form);
+    const ownership = ownershipOf(form);
+    if (!format || !ownership) return back(url, { err: 'Invalid format or ownership.' });
+    const { fulfilled } = updateCopy(copyId!, {
+      format,
+      ownership,
+      edition: str(form, 'edition') || null,
+      notes: str(form, 'notes') || null,
+      reviewStatus: 'confirmed',
+    });
+    return back(url, { ok: `Copy saved.${fulfilled.length ? ' Wishlist item fulfilled 🎉' : ''}` });
+  }
+  if (action === 'delete_copy' && ownsCopy(copyId)) {
+    deleteCopy(copyId!);
+    return back(url, { ok: 'Copy removed. Its files stay listed below as unlinked.' });
+  }
+  if (action === 'link_file') {
+    const fileId = int(form, 'file_id');
+    const target = str(form, 'target');
+    const file = fileId !== null ? db.select().from(files).where(and(eq(files.id, fileId), eq(files.movieId, movie.id))).get() : undefined;
+    if (!file) return back(url, { err: 'Unknown file.' });
+    if (target === 'new') {
+      const format = formatOf(form) ?? 'bluray';
+      const { copy } = addCopy(movie.id, {
+        format,
+        ownership: ownershipOf(form) ?? 'unverified',
+        edition: file.edition,
+        origin: 'manual',
+        reviewStatus: 'confirmed',
+      });
+      db.update(files).set({ copyId: copy.id }).where(eq(files.id, file.id)).run();
+    } else if (target === 'none') {
+      db.update(files).set({ copyId: null }).where(eq(files.id, file.id)).run();
+    } else if (ownsCopy(Number(target))) {
+      db.update(files).set({ copyId: Number(target) }).where(eq(files.id, file.id)).run();
+    }
+    return back(url, { ok: 'File link updated.' });
+  }
+  if (action === 'forget_file') {
+    const fileId = int(form, 'file_id');
+    if (fileId !== null) db.delete(files).where(and(eq(files.id, fileId), eq(files.movieId, movie.id), eq(files.missing, true))).run();
+    return back(url, { ok: 'Missing file forgotten.' });
+  }
+  if (action === 'wishlist') {
+    const target = targetOf(form);
+    if (!target) return back(url, { err: 'Pick Blu-ray or 4K.' });
+    const res = addToWishlist(movie.id, target, { priority: int(form, 'priority') ?? undefined, notes: str(form, 'notes') || null });
+    return back(url, res.ok ? { ok: `Wishlist: ${TARGET_LABEL[target]}.` } : { err: res.reason });
+  }
+  if (action === 'unwish') {
+    const itemId = int(form, 'item_id');
+    const item = itemId !== null ? db.select().from(wishlistItems).where(eq(wishlistItems.id, itemId)).get() : undefined;
+    if (item?.movieId === movie.id) removeWishlistItem(item.id);
+    return back(url, { ok: 'Removed from wishlist.' });
+  }
+  if (action === 'refresh') {
+    try {
+      await refreshMovie(movie.id);
+      return back(url, { ok: 'Metadata refreshed from TMDB.' });
+    } catch (e) {
+      return back(url, { err: (e as Error).message });
+    }
+  }
+  if (action === 'delete_movie') {
+    db.delete(movies).where(eq(movies.id, movie.id)).run();
+    return Astro.redirect(`/?ok=${encodeURIComponent(`Deleted ${movie.title}.`)}`, 303);
+  }
+  return back(url, { err: 'Unknown action.' });
+}
+
+const copyRows = movieCopies(movie.id);
+const fileRows = isAdmin ? db.select().from(files).where(eq(files.movieId, movie.id)).all() : [];
+const wishRows = db.select().from(wishlistItems).where(eq(wishlistItems.movieId, movie.id)).orderBy(desc(wishlistItems.createdAt)).all();
+const openWish = wishRows.find((w) => !w.fulfilledAt);
+const fulfilledWish = wishRows.filter((w) => w.fulfilledAt);
+const filesByCopy = (id: number) => fileRows.filter((f) => f.copyId === id);
+const unlinked = fileRows.filter((f) => f.copyId === null);
+const backdrop = posterUrl(movie.backdropPath, 'w780');
+const fileName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+---
+
+<Layout title={movie.title}>
+  {backdrop && (
+    <div class="pointer-events-none absolute inset-x-0 top-12 -z-10 h-[420px] overflow-hidden">
+      <img src={backdrop} alt="" class="h-full w-full object-cover opacity-20 blur-[2px]" />
+      <div class="absolute inset-0 bg-gradient-to-b from-ink-950/40 via-ink-950/80 to-ink-950"></div>
+    </div>
+  )}
+
+  <div class="grid gap-8 md:grid-cols-[240px_1fr]">
+    <div class="mx-auto w-44 md:w-full">
+      <Poster path={movie.posterPath} title={movie.title} size="w500" class="shadow-2xl ring-1 ring-ink-700" />
+    </div>
+
+    <div class="min-w-0">
+      <h1 class="text-3xl font-semibold tracking-tight">
+        {movie.title} <span class="font-normal text-ink-400">{movie.year && `(${movie.year})`}</span>
+      </h1>
+      {movie.originalTitle && movie.originalTitle !== movie.title && <p class="mt-1 text-ink-400">{movie.originalTitle}</p>}
+      <p class="mt-2 text-sm text-ink-400">
+        {[movie.runtime && `${movie.runtime} min`, ...(movie.genres ?? [])].filter(Boolean).join(' · ')}
+      </p>
+      <div class="mt-3 flex flex-wrap gap-3 text-sm">
+        <a class="text-ink-300 underline decoration-ink-600 underline-offset-2 hover:text-white" href={`https://www.themoviedb.org/movie/${movie.tmdbId}`} target="_blank" rel="noopener">TMDB</a>
+        {movie.imdbId && <a class="text-ink-300 underline decoration-ink-600 underline-offset-2 hover:text-white" href={`https://www.imdb.com/title/${movie.imdbId}/`} target="_blank" rel="noopener">IMDb</a>}
+      </div>
+      {movie.overview && <p class="mt-4 max-w-3xl leading-relaxed text-ink-300">{movie.overview}</p>}
+
+      <!-- Wishlist -->
+      <section class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold">Wishlist</h2>
+        {
+          openWish ? (
+            <div class="card flex flex-wrap items-center justify-between gap-3 border-rose-900/60 p-4">
+              <div>
+                <p class="font-medium text-rose-200">
+                  ♥ {openWish.kind === 'upgrade' ? 'Upgrade wanted' : 'Want to buy'} · {TARGET_LABEL[openWish.targetFormat]}
+                </p>
+                <p class="text-sm text-ink-400">
+                  Priority {['', 'high', 'normal', 'low'][openWish.priority]}
+                  {openWish.notes && ` · ${openWish.notes}`}
+                </p>
+              </div>
+              {isAdmin && (
+                <form method="post">
+                  <input type="hidden" name="_action" value="unwish" />
+                  <input type="hidden" name="item_id" value={openWish.id} />
+                  <button class="btn btn-sm">Remove</button>
+                </form>
+              )}
+            </div>
+          ) : (
+            !isAdmin && <p class="text-sm text-ink-400">Not on the wishlist.</p>
+          )
+        }
+        {
+          isAdmin && (
+            <form method="post" class="mt-3 flex flex-wrap items-center gap-2">
+              <input type="hidden" name="_action" value="wishlist" />
+              <select name="target" aria-label="Target format">
+                <option value="bluray" selected={openWish?.targetFormat !== 'uhd'}>Blu-ray is enough</option>
+                <option value="uhd" selected={openWish?.targetFormat === 'uhd'}>4K only</option>
+              </select>
+              <select name="priority" aria-label="Priority">
+                <option value="1" selected={openWish?.priority === 1}>High</option>
+                <option value="2" selected={!openWish || openWish.priority === 2}>Normal</option>
+                <option value="3" selected={openWish?.priority === 3}>Low</option>
+              </select>
+              <input name="notes" placeholder="Notes (edition, steelbook…)" value={openWish?.notes ?? ''} class="min-w-48 flex-1" />
+              <button class="btn">{openWish ? 'Update wish' : 'Add to wishlist'}</button>
+            </form>
+          )
+        }
+        {fulfilledWish.length > 0 && (
+          <p class="mt-2 text-xs text-ink-500">
+            Fulfilled: {fulfilledWish.map((w) => `${TARGET_LABEL[w.targetFormat]} on ${w.fulfilledAt!.toLocaleDateString('en-GB')}`).join(', ')}
+          </p>
+        )}
+      </section>
+
+      <!-- Copies -->
+      <section class="mt-8">
+        <h2 class="mb-3 text-lg font-semibold">Copies</h2>
+        {copyRows.length === 0 && <p class="text-sm text-ink-400">No copies. {isAdmin && 'Add one below.'}</p>}
+        <div class="space-y-3">
+          {
+            copyRows.map((c) =>
+              isAdmin ? (
+                <div class:list={['card p-4', c.reviewStatus === 'needs_review' && 'border-amber-700/60']}>
+                  <form method="post" class="flex flex-wrap items-end gap-2">
+                    <input type="hidden" name="_action" value="update_copy" />
+                    <input type="hidden" name="copy_id" value={c.id} />
+                    <div class="flex flex-col gap-1">
+                      <label>Format</label>
+                      <select name="format">
+                        {FORMATS.map((f) => <option value={f} selected={c.format === f}>{FORMAT_LABEL[f]}</option>)}
+                      </select>
+                    </div>
+                    <div class="flex flex-col gap-1">
+                      <label>Ownership</label>
+                      <select name="ownership">
+                        {OWNERSHIPS.map((o) => <option value={o} selected={c.ownership === o}>{OWNERSHIP_LABEL[o]}</option>)}
+                      </select>
+                    </div>
+                    <div class="flex flex-col gap-1">
+                      <label>Edition</label>
+                      <input name="edition" value={c.edition ?? ''} placeholder="Theatrical" class="w-40" />
+                    </div>
+                    <div class="flex min-w-40 flex-1 flex-col gap-1">
+                      <label>Notes</label>
+                      <input name="notes" value={c.notes ?? ''} placeholder="Steelbook, box set…" />
+                    </div>
+                    <button class="btn btn-primary">{c.reviewStatus === 'needs_review' ? 'Confirm' : 'Save'}</button>
+                  </form>
+                  <div class="mt-3 flex flex-wrap items-center justify-between gap-2 text-xs text-ink-400">
+                    <span>
+                      {c.origin === 'plex' ? 'Imported from Plex' : c.origin === 'pipeline' ? 'Added by media-pipeline' : 'Added manually'}
+                      {c.reviewStatus === 'needs_review' && c.suggestionReason && (
+                        <span class="text-amber-300"> · suggested: {c.suggestionReason}</span>
+                      )}
+                    </span>
+                    <form method="post" onsubmit="return confirm('Remove this copy?')">
+                      <input type="hidden" name="_action" value="delete_copy" />
+                      <input type="hidden" name="copy_id" value={c.id} />
+                      <button class="btn btn-sm btn-danger">Remove copy</button>
+                    </form>
+                  </div>
+                  {filesByCopy(c.id).length > 0 && (
+                    <ul class="mt-3 space-y-1 border-t border-ink-800 pt-3 text-xs">
+                      {filesByCopy(c.id).map((f) => (
+                        <li class="flex flex-wrap items-center gap-2">
+                          <span class:list={['font-mono text-ink-300', f.missing && 'line-through opacity-60']} title={f.relPath}>{fileName(f.relPath)}</span>
+                          <span class="text-ink-500">
+                            {[resolutionLabel(f.width, f.height), f.hdr === 'dv' ? `DV${f.dvProfile ? ` P${f.dvProfile}` : ''}` : f.hdr === 'hdr10' ? 'HDR10' : '', f.codec, formatBytes(f.sizeBytes), f.parts > 1 ? `${f.parts} parts` : '', f.missing ? 'missing from Plex' : '']
+                              .filter(Boolean)
+                              .join(' · ')}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : (
+                <div class="card flex flex-wrap items-center gap-2 p-3">
+                  <FormatBadge format={c.format} />
+                  {c.edition && <span class="text-sm text-ink-300">{c.edition}</span>}
+                  {c.notes && <span class="text-sm text-ink-400">· {c.notes}</span>}
+                </div>
+              ),
+            )
+          }
+        </div>
+
+        {
+          isAdmin && (
+            <form method="post" class="card mt-4 flex flex-wrap items-end gap-2 border-dashed p-4">
+              <input type="hidden" name="_action" value="add_copy" />
+              <div class="flex flex-col gap-1">
+                <label>Format</label>
+                <select name="format">
+                  {FORMATS.map((f) => <option value={f} selected={f === 'bluray'}>{FORMAT_LABEL[f]}</option>)}
+                </select>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label>Ownership</label>
+                <select name="ownership">
+                  {OWNERSHIPS.map((o) => <option value={o}>{OWNERSHIP_LABEL[o]}</option>)}
+                </select>
+              </div>
+              <div class="flex flex-col gap-1">
+                <label>Edition</label>
+                <input name="edition" placeholder="optional" class="w-40" />
+              </div>
+              <div class="flex min-w-40 flex-1 flex-col gap-1">
+                <label>Notes</label>
+                <input name="notes" placeholder="optional" />
+              </div>
+              <button class="btn">Add copy</button>
+            </form>
+          )
+        }
+      </section>
+
+      {
+        isAdmin && unlinked.length > 0 && (
+          <section class="mt-8">
+            <h2 class="mb-1 text-lg font-semibold">Unlinked files</h2>
+            <p class="mb-3 text-sm text-ink-400">Files in the library not attached to any copy.</p>
+            <div class="space-y-2">
+              {unlinked.map((f) => (
+                <div class="card flex flex-wrap items-center justify-between gap-3 p-3 text-sm">
+                  <div class="min-w-0">
+                    <p class:list={['truncate font-mono text-xs text-ink-300', f.missing && 'line-through']} title={f.relPath}>{fileName(f.relPath)}</p>
+                    <p class="text-xs text-ink-500">
+                      {[resolutionLabel(f.width, f.height), f.hdr !== 'none' ? f.hdr : '', formatBytes(f.sizeBytes), f.missing ? 'missing' : ''].filter(Boolean).join(' · ')}
+                    </p>
+                  </div>
+                  <div class="flex gap-2">
+                    <form method="post" class="flex gap-2">
+                      <input type="hidden" name="_action" value="link_file" />
+                      <input type="hidden" name="file_id" value={f.id} />
+                      <select name="target" aria-label="Link to">
+                        {copyRows.map((c) => <option value={c.id}>→ {FORMAT_LABEL[c.format]} {c.edition ?? ''} ({OWNERSHIP_LABEL[c.ownership]})</option>)}
+                        <option value="new">→ new copy</option>
+                      </select>
+                      <button class="btn btn-sm">Link</button>
+                    </form>
+                    {f.missing && (
+                      <form method="post">
+                        <input type="hidden" name="_action" value="forget_file" />
+                        <input type="hidden" name="file_id" value={f.id} />
+                        <button class="btn btn-sm btn-danger">Forget</button>
+                      </form>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
+        )
+      }
+
+      {
+        isAdmin && (
+          <section class="mt-10 flex flex-wrap gap-2 border-t border-ink-800 pt-4">
+            <form method="post">
+              <input type="hidden" name="_action" value="refresh" />
+              <button class="btn btn-sm">Refresh from TMDB</button>
+            </form>
+            <form method="post" onsubmit="return confirm('Delete this movie with all copies, files and wishlist items?')">
+              <input type="hidden" name="_action" value="delete_movie" />
+              <button class="btn btn-sm btn-danger">Delete movie</button>
+            </form>
+          </section>
+        )
+      }
+    </div>
+  </div>
+</Layout>

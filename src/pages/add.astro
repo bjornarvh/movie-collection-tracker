@@ -1,0 +1,124 @@
+---
+import FormatBadge from '../components/FormatBadge.astro';
+import Poster from '../components/Poster.astro';
+import { FORMATS, OWNERSHIPS } from '../db/schema';
+import { addCopy, addToWishlist, ensureMovie, loadLibrary } from '../lib/collection';
+import { backWithQuery, formatOf, int, ownershipOf, str, targetOf } from '../lib/forms';
+import { bestFormat, FORMAT_LABEL, OWNERSHIP_LABEL, TARGET_LABEL } from '../lib/formats';
+import { releaseYear, searchMovies, tmdbConfigured, type TmdbSearchResult } from '../lib/tmdb';
+import Layout from '../layouts/Layout.astro';
+
+const url = Astro.url;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const tmdbId = int(form, 'tmdb_id');
+  if (!tmdbId) return backWithQuery(url, { err: 'Missing movie.' });
+  try {
+    const { movie } = await ensureMovie(tmdbId);
+    if (str(form, '_action') === 'wishlist') {
+      const target = targetOf(form);
+      if (!target) return backWithQuery(url, { err: 'Pick a target format.' });
+      const res = addToWishlist(movie.id, target);
+      return backWithQuery(url, res.ok ? { ok: `${movie.title} added to wishlist (${TARGET_LABEL[target]}).` } : { err: res.reason });
+    }
+    const format = formatOf(form);
+    if (!format) return backWithQuery(url, { err: 'Pick a format.' });
+    const { fulfilled } = addCopy(movie.id, {
+      format,
+      ownership: ownershipOf(form) ?? 'owned',
+      edition: str(form, 'edition') || null,
+      origin: 'manual',
+      reviewStatus: 'confirmed',
+    });
+    return backWithQuery(url, {
+      ok: `${movie.title}: added ${FORMAT_LABEL[format]}.${fulfilled.length ? ' Wishlist item fulfilled 🎉' : ''}`,
+    });
+  } catch (e) {
+    return backWithQuery(url, { err: (e as Error).message });
+  }
+}
+
+const q = url.searchParams.get('q')?.trim() ?? '';
+const yearParam = Number(url.searchParams.get('year'));
+let results: TmdbSearchResult[] = [];
+let error = '';
+if (q && tmdbConfigured()) {
+  // Allow pasting a TMDB URL or id directly.
+  const idMatch = q.match(/^(?:https?:\/\/www\.themoviedb\.org\/movie\/)?(\d+)(?:-[\w-]*)?\/?$/);
+  try {
+    results = idMatch
+      ? [{ id: Number(idMatch[1]), title: `TMDB #${idMatch[1]}`, original_title: '', poster_path: null }]
+      : (await searchMovies(q, Number.isInteger(yearParam) && yearParam > 1800 ? yearParam : undefined)).slice(0, 20);
+  } catch (e) {
+    error = (e as Error).message;
+  }
+}
+
+const library = new Map(loadLibrary().map((m) => [m.tmdbId, m]));
+---
+
+<Layout title="Add movie">
+  <h1 class="mb-1 text-2xl font-semibold tracking-tight">Add a movie</h1>
+  <p class="mb-5 text-sm text-ink-400">Search TMDB, then add it to the collection or the wishlist.</p>
+
+  {!tmdbConfigured() && <p class="card mb-4 p-4 text-sm text-amber-200">TMDB_API_KEY is not set, so search is unavailable.</p>}
+
+  <form method="get" class="mb-6 flex flex-wrap gap-2">
+    <input type="search" name="q" value={q} placeholder="Title, TMDB id or TMDB link…" autofocus class="min-w-64 flex-1" />
+    <input type="number" name="year" value={url.searchParams.get('year') ?? ''} placeholder="Year" class="w-24" min="1880" max="2100" />
+    <button class="btn btn-primary">Search</button>
+  </form>
+
+  {error && <p class="card mb-4 p-4 text-sm text-red-200">{error}</p>}
+  {q && !error && results.length === 0 && tmdbConfigured() && <p class="text-ink-400">No results for “{q}”.</p>}
+
+  <div class="space-y-3">
+    {
+      results.map((r) => {
+        const have = library.get(r.id);
+        const best = have ? bestFormat(have.copies) : null;
+        return (
+          <div class="card flex gap-4 p-3">
+            <Poster path={r.poster_path} title={r.title} size="w185" class="w-20 shrink-0" />
+            <div class="min-w-0 flex-1">
+              <div class="flex flex-wrap items-baseline gap-2">
+                <h2 class="font-semibold">
+                  {have ? <a class="hover:text-accent" href={`/movie/${r.id}`}>{r.title}</a> : r.title}
+                </h2>
+                <span class="text-sm text-ink-400">{releaseYear(r)}</span>
+                {r.original_title && r.original_title !== r.title && <span class="text-sm text-ink-500">{r.original_title}</span>}
+                {best && <FormatBadge format={best} />}
+                {have?.wish && <span class="chip bg-rose-600 text-white">♥ wished</span>}
+              </div>
+              {r.overview && <p class="mt-1 line-clamp-2 text-sm text-ink-400">{r.overview}</p>}
+              <div class="mt-3 flex flex-wrap gap-4">
+                <form method="post" class="flex flex-wrap items-center gap-2">
+                  <input type="hidden" name="tmdb_id" value={r.id} />
+                  <input type="hidden" name="_action" value="copy" />
+                  <select name="format" aria-label="Format">
+                    {FORMATS.map((f) => <option value={f} selected={f === 'bluray'}>{FORMAT_LABEL[f]}</option>)}
+                  </select>
+                  <select name="ownership" aria-label="Ownership">
+                    {OWNERSHIPS.map((o) => <option value={o}>{OWNERSHIP_LABEL[o]}</option>)}
+                  </select>
+                  <input name="edition" placeholder="Edition" class="w-32" />
+                  <button class="btn btn-sm">Add to collection</button>
+                </form>
+                <form method="post" class="flex items-center gap-2">
+                  <input type="hidden" name="tmdb_id" value={r.id} />
+                  <input type="hidden" name="_action" value="wishlist" />
+                  <select name="target" aria-label="Target">
+                    <option value="bluray">Blu-ray is enough</option>
+                    <option value="uhd">4K only</option>
+                  </select>
+                  <button class="btn btn-sm">♥ Wishlist</button>
+                </form>
+              </div>
+            </div>
+          </div>
+        );
+      })
+    }
+  </div>
+</Layout>

@@ -8,7 +8,18 @@ import * as schema from './schema';
 
 function open(file: string) {
   if (file !== ':memory:') mkdirSync(path.dirname(file), { recursive: true });
-  const sqlite = new Database(file);
+  let sqlite: Database.Database;
+  try {
+    sqlite = new Database(file);
+  } catch (err) {
+    const uid = process.getuid?.() ?? '?';
+    const gid = process.getgid?.() ?? '?';
+    throw new Error(
+      `Cannot open database ${file} (${(err as Error).message}). ` +
+        `Check that ${path.dirname(file)} exists and is writable by uid ${uid}, gid ${gid}.`,
+      { cause: err },
+    );
+  }
   sqlite.pragma('journal_mode = WAL');
   sqlite.pragma('foreign_keys = ON');
   sqlite.pragma('busy_timeout = 5000');

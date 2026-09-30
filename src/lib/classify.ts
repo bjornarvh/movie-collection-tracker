@@ -101,6 +101,11 @@ export function classify(input: ClassifyInput): Classification {
     return { format, ownership: 'pirated', confidence: 0.7, reasons: [...reasons, 'XviD/Nordic release naming'] };
   }
   if (nfoRelease) {
+    // The original release name says more about the source than a renamed file.
+    if (WEB_SOURCE.test(nfoRelease) && !BLURAY_SOURCE.test(nfoRelease) && format !== 'digital') {
+      format = 'digital';
+      reasons.push('WEB release in nfo → digital');
+    }
     return { format, ownership: 'pirated', confidence: 0.8, reasons: [...reasons, `nfo names release "${nfoRelease}"`] };
   }
   if (PIPELINE_NAME.test(name)) {

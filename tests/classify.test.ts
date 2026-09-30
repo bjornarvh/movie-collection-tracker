@@ -91,6 +91,16 @@ describe('classify', () => {
     expect(c.ownership).toBe('pirated');
   });
 
+  it('WEB release named in nfo makes the copy digital', () => {
+    const c = classify({
+      fileName: 'Wicked - For Good (2025).mkv',
+      width: 1918,
+      height: 802,
+      nfoText: 'Wicked.For.Good.2025.1080p.WEB.h264-ETHEL\n',
+    });
+    expect(c).toMatchObject({ format: 'digital', ownership: 'pirated' });
+  });
+
   it('DVD with VobSub subtitles leans owned', () => {
     const c = classify({
       fileName: 'A Somewhat Gentle Man (2010).mkv',

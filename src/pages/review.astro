@@ -1,0 +1,237 @@
+---
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import OwnershipBadge from '../components/OwnershipBadge.astro';
+import Poster from '../components/Poster.astro';
+import { db } from '../db/client';
+import { copies, files, FORMATS, movies, OWNERSHIPS, type Format, type Ownership } from '../db/schema';
+import { deleteCopy, fulfillWishlist } from '../lib/collection';
+import { backWithQuery, formatOf, ints, oneOf, ownershipOf, str } from '../lib/forms';
+import { FORMAT_LABEL, formatBytes, OWNERSHIP_LABEL, resolutionLabel } from '../lib/formats';
+import Layout from '../layouts/Layout.astro';
+
+const PAGE_SIZE = 50;
+const url = Astro.url;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const action = str(form, '_action');
+  const selected = ints(form, 'selected');
+  const touched = new Set<number>();
+
+  const confirm = (id: number, format: Format, ownership: Ownership) => {
+    const row = db
+      .update(copies)
+      .set({ format, ownership, reviewStatus: 'confirmed', updatedAt: new Date() })
+      .where(and(eq(copies.id, id), eq(copies.reviewStatus, 'needs_review')))
+      .returning({ movieId: copies.movieId })
+      .get();
+    if (row) touched.add(row.movieId);
+  };
+
+  let msg = '';
+  if (action === 'bulk') {
+    // Confirm the selected rows using whatever is chosen in each row's selects,
+    // optionally overriding ownership for all of them.
+    const override = oneOf(OWNERSHIPS, str(form, 'bulk_ownership'));
+    db.transaction(() => {
+      for (const id of selected) {
+        const format = formatOf(form, `format_${id}`);
+        const ownership = override ?? ownershipOf(form, `ownership_${id}`);
+        if (format && ownership) confirm(id, format, ownership);
+      }
+    });
+    msg = `Confirmed ${selected.length} ${selected.length === 1 ? 'copy' : 'copies'}.`;
+  } else if (action.startsWith('one_')) {
+    const id = Number(action.slice(4));
+    const format = formatOf(form, `format_${id}`);
+    const ownership = ownershipOf(form, `ownership_${id}`);
+    if (format && ownership) confirm(id, format, ownership);
+    msg = 'Confirmed.';
+  } else if (action === 'delete') {
+    for (const id of selected) deleteCopy(id);
+    msg = `Removed ${selected.length} ${selected.length === 1 ? 'copy' : 'copies'} (files stay as unlinked).`;
+  }
+  let fulfilled = 0;
+  for (const movieId of touched) fulfilled += fulfillWishlist(movieId).length;
+  if (fulfilled) msg += ` ${fulfilled} wishlist item(s) fulfilled.`;
+  return backWithQuery(url, { ok: msg || 'Nothing to do.' });
+}
+
+const qp = url.searchParams;
+const suggested = oneOf(OWNERSHIPS, qp.get('suggested') ?? '');
+const formatFilter = oneOf(FORMATS, qp.get('format') ?? '');
+const sort = qp.get('sort') === 'confidence' ? 'confidence' : 'title';
+const page = Math.max(1, Number(qp.get('page')) || 1);
+
+const where = and(
+  eq(copies.reviewStatus, 'needs_review'),
+  suggested ? eq(copies.ownership, suggested) : undefined,
+  formatFilter ? eq(copies.format, formatFilter) : undefined,
+);
+const total = db.select({ n: sql<number>`count(*)` }).from(copies).where(where).get()?.n ?? 0;
+const counts = db
+  .select({ ownership: copies.ownership, n: sql<number>`count(*)` })
+  .from(copies)
+  .where(eq(copies.reviewStatus, 'needs_review'))
+  .groupBy(copies.ownership)
+  .all();
+const rows = db
+  .select({ copy: copies, movie: movies })
+  .from(copies)
+  .innerJoin(movies, eq(movies.id, copies.movieId))
+  .where(where)
+  .orderBy(...(sort === 'confidence' ? [desc(copies.confidence), asc(movies.title)] : [asc(movies.title), asc(copies.id)]))
+  .limit(PAGE_SIZE)
+  .offset((page - 1) * PAGE_SIZE)
+  .all();
+const fileRows = rows.length ? db.select().from(files).where(inArray(files.copyId, rows.map((r) => r.copy.id))).all() : [];
+const filesFor = (copyId: number) => fileRows.filter((f) => f.copyId === copyId);
+const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+const pageLink = (p: number) => {
+  const u = new URLSearchParams(qp);
+  u.set('page', String(p));
+  u.delete('ok');
+  return `/review?${u}`;
+};
+const fileName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
+---
+
+<Layout title="Review" wide>
+  <div class="mb-4">
+    <h1 class="text-2xl font-semibold tracking-tight">Review imports</h1>
+    <p class="mt-1 max-w-3xl text-sm text-ink-400">
+      Copies found by the Plex scan with a guessed format and ownership. Adjust anything that's wrong, tick the rows, and confirm. The
+      guess is based on resolution, file naming (release groups, pipeline/MakeMKV names) and .nfo files.
+    </p>
+    <p class="mt-2 flex flex-wrap gap-2 text-xs">
+      {counts.map((c) => <span class="text-ink-400"><OwnershipBadge ownership={c.ownership} /> {c.n}</span>)}
+    </p>
+  </div>
+
+  <form method="get" class="card mb-4 flex flex-wrap items-center gap-2 p-3">
+    <select name="suggested" aria-label="Suggested ownership">
+      <option value="">Any suggestion</option>
+      {OWNERSHIPS.map((o) => <option value={o} selected={suggested === o}>Suggested {OWNERSHIP_LABEL[o].toLowerCase()}</option>)}
+    </select>
+    <select name="format" aria-label="Format">
+      <option value="">Any format</option>
+      {FORMATS.map((f) => <option value={f} selected={formatFilter === f}>{FORMAT_LABEL[f]}</option>)}
+    </select>
+    <select name="sort" aria-label="Sort">
+      <option value="title">By title</option>
+      <option value="confidence" selected={sort === 'confidence'}>Most confident first</option>
+    </select>
+    <button class="btn">Filter</button>
+    <span class="ml-auto text-sm text-ink-400">{total} to review</span>
+  </form>
+
+  {total === 0 && <p class="card p-10 text-center text-ink-400">All caught up. 🎉</p>}
+
+  {
+    rows.length > 0 && (
+      <form method="post" id="review-form">
+        <div class="card sticky top-[53px] z-10 mb-3 flex flex-wrap items-center gap-2 p-2.5 shadow-lg">
+          <label class="flex items-center gap-2 px-1">
+            <input type="checkbox" id="select-all" /> Select page
+          </label>
+          <span class="text-ink-600">|</span>
+          <select name="bulk_ownership" aria-label="Ownership for selected">
+            <option value="">Keep each row's ownership</option>
+            {OWNERSHIPS.map((o) => <option value={o}>Set all selected to {OWNERSHIP_LABEL[o].toLowerCase()}</option>)}
+          </select>
+          <button class="btn btn-primary" name="_action" value="bulk">Confirm selected</button>
+          <button class="btn btn-danger" name="_action" value="delete" onclick="return confirm('Remove the selected copies?')">
+            Remove selected
+          </button>
+        </div>
+
+        <div class="card overflow-x-auto">
+          <table class="table">
+            <thead>
+              <tr>
+                <th class="w-8" />
+                <th>Movie</th>
+                <th>File</th>
+                <th>Format</th>
+                <th>Ownership</th>
+                <th>Why</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(({ copy, movie }) => (
+                <tr class="hover:bg-ink-850">
+                  <td>
+                    <input type="checkbox" name="selected" value={copy.id} class="row-check" aria-label={`Select ${movie.title}`} />
+                  </td>
+                  <td class="min-w-56">
+                    <div class="flex items-center gap-2.5">
+                      <Poster path={movie.posterPath} title={movie.title} size="w185" class="w-9 shrink-0" />
+                      <div class="min-w-0">
+                        <a href={`/movie/${movie.tmdbId}`} class="font-medium hover:text-accent" target="_blank">{movie.title}</a>
+                        <p class="text-xs text-ink-400">
+                          {movie.year}
+                          {copy.edition && ` · ${copy.edition}`}
+                        </p>
+                      </div>
+                    </div>
+                  </td>
+                  <td class="max-w-md">
+                    {filesFor(copy.id).map((f) => (
+                      <div class="text-xs">
+                        <p class="truncate font-mono text-ink-300" title={f.relPath}>{fileName(f.relPath)}</p>
+                        <p class="text-ink-500">
+                          {[resolutionLabel(f.width, f.height), f.width && `${f.width}×${f.height}`, f.hdr === 'dv' ? 'DV' : f.hdr === 'hdr10' ? 'HDR10' : '', formatBytes(f.sizeBytes)].filter(Boolean).join(' · ')}
+                        </p>
+                      </div>
+                    ))}
+                  </td>
+                  <td>
+                    <select name={`format_${copy.id}`} aria-label="Format">
+                      {FORMATS.map((f) => <option value={f} selected={copy.format === f}>{FORMAT_LABEL[f]}</option>)}
+                    </select>
+                  </td>
+                  <td>
+                    <select name={`ownership_${copy.id}`} aria-label="Ownership">
+                      {OWNERSHIPS.map((o) => <option value={o} selected={copy.ownership === o}>{OWNERSHIP_LABEL[o]}</option>)}
+                    </select>
+                  </td>
+                  <td class="max-w-xs text-xs text-ink-400">
+                    {copy.suggestionReason}
+                    {copy.confidence ? <span class="text-ink-500"> ({Math.round(copy.confidence * 100)}%)</span> : null}
+                  </td>
+                  <td>
+                    <button class="btn btn-sm" name="_action" value={`one_${copy.id}`}>Confirm</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </form>
+    )
+  }
+
+  {
+    pages > 1 && (
+      <nav class="mt-4 flex items-center justify-center gap-2 text-sm">
+        {page > 1 && <a class="btn btn-sm" href={pageLink(page - 1)}>← Prev</a>}
+        <span class="text-ink-400">Page {page} of {pages}</span>
+        {page < pages && <a class="btn btn-sm" href={pageLink(page + 1)}>Next →</a>}
+      </nav>
+    )
+  }
+
+  <script>
+    const all = document.getElementById('select-all') as HTMLInputElement | null;
+    const boxes = () => Array.from(document.querySelectorAll<HTMLInputElement>('.row-check'));
+    all?.addEventListener('change', () => boxes().forEach((b) => (b.checked = all.checked)));
+    // Changing a row's selects implies you want it included.
+    document.querySelectorAll<HTMLSelectElement>('#review-form tbody select').forEach((s) =>
+      s.addEventListener('change', () => {
+        const box = s.closest('tr')?.querySelector<HTMLInputElement>('.row-check');
+        if (box) box.checked = true;
+      }),
+    );
+  </script>
+</Layout>

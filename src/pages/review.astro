@@ -154,7 +154,7 @@ const fileName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
           </button>
           <p class="ml-auto hidden text-xs text-ink-400 lg:block" id="shortcut-help">
             <kbd>↑</kbd>/<kbd>↓</kbd> or <kbd>j</kbd>/<kbd>k</kbd> move · <kbd>o</kbd>/<kbd>p</kbd>/<kbd>u</kbd> owned/pirated/unverified and confirm ·
-            <kbd>1</kbd>–<kbd>4</kbd> DVD/Digital/Blu-ray/4K · <kbd>Enter</kbd> confirm · <kbd>x</kbd> select
+            <kbd>1</kbd>–<kbd>4</kbd> DVD/Digital/Blu-ray/4K (<kbd>Space</kbd> opens list) · <kbd>Enter</kbd> confirm · <kbd>x</kbd> select
           </p>
         </div>
         <p id="review-status" class="sr-only" role="status" aria-live="polite"></p>
@@ -264,9 +264,11 @@ const fileName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
     const select = (row: HTMLTableRowElement, kind: 'format' | 'ownership') =>
       row.querySelector<HTMLSelectElement>(`select[name="${kind}_${row.dataset.copyId}"]`)!;
 
+    // Land on the row's format select: it's the field you most often change,
+    // and the shortcuts work from inside it too.
     function focusRow(row: HTMLTableRowElement | undefined | null) {
       if (!row) return;
-      row.focus({ preventScroll: true });
+      select(row, 'format').focus({ preventScroll: true });
       row.scrollIntoView({ block: 'nearest' });
     }
 
@@ -346,16 +348,16 @@ const fileName = (p: string) => p.slice(p.lastIndexOf('/') + 1);
       // Leave typing in text fields (and the toolbar) alone.
       if (target.matches('input:not([type=checkbox]), textarea')) return;
       const row = rowOf(target);
-      const onSelect = target instanceof HTMLSelectElement;
       const key = e.key;
 
-      // Arrows only move between rows from a row (not inside a select, and not
-      // when nothing is focused, so the page still scrolls normally).
-      if (key === 'j' || (key === 'ArrowDown' && row && !onSelect)) {
+      // Arrows move between rows from anywhere in a row, including a (closed)
+      // select: formats are changed with 1–4, or Space/Alt+↓ to open the list.
+      // With nothing focused they're left alone so the page still scrolls.
+      if (key === 'j' || (key === 'ArrowDown' && row)) {
         e.preventDefault();
         return move(row, 1);
       }
-      if (key === 'k' || (key === 'ArrowUp' && row && !onSelect)) {
+      if (key === 'k' || (key === 'ArrowUp' && row)) {
         e.preventDefault();
         return move(row, -1);
       }

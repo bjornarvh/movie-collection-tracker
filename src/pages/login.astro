@@ -1,0 +1,59 @@
+---
+import Layout from '../layouts/Layout.astro';
+import { clearFailures, createSession, isHttps, isRateLimited, recordFailure, SESSION_COOKIE, verifyLogin } from '../lib/auth';
+import { safeNext, str } from '../lib/forms';
+
+const next = safeNext(Astro.url.searchParams.get('next'));
+let error = '';
+
+if (Astro.request.method === 'POST') {
+  const ip = Astro.request.headers.get('x-forwarded-for')?.split(',')[0].trim() || Astro.clientAddress;
+  const form = await Astro.request.formData();
+  const username = str(form, 'username');
+  const key = `${ip}|${username.toLowerCase()}`;
+  if (isRateLimited(ip) || isRateLimited(key)) {
+    error = 'Too many failed attempts. Try again in 15 minutes.';
+  } else {
+    const user = await verifyLogin(username, str(form, 'password'));
+    if (user) {
+      clearFailures(key);
+      const { token, expiresAt } = createSession(user.id);
+      Astro.cookies.set(SESSION_COOKIE, token, {
+        path: '/',
+        httpOnly: true,
+        sameSite: 'lax',
+        secure: isHttps(Astro.request),
+        expires: expiresAt,
+      });
+      return Astro.redirect(next, 303);
+    }
+    recordFailure(ip);
+    recordFailure(key);
+    error = 'Wrong username or password.';
+  }
+}
+---
+
+<Layout title="Log in">
+  <div class="mx-auto mt-[12vh] max-w-sm">
+    <div class="mb-6 flex items-center gap-3">
+      <span class="grid h-10 w-10 place-items-center rounded-lg bg-accent text-lg text-ink-950">▶</span>
+      <div>
+        <h1 class="text-xl font-semibold">Movie Shelf</h1>
+        <p class="text-sm text-ink-400">Log in to see the collection</p>
+      </div>
+    </div>
+    <form method="post" class="card space-y-4 p-6">
+      {error && <p class="rounded-md bg-red-950/60 px-3 py-2 text-sm text-red-200">{error}</p>}
+      <div class="space-y-1">
+        <label for="username">Username</label>
+        <input id="username" name="username" autocomplete="username" required autofocus class="w-full" />
+      </div>
+      <div class="space-y-1">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="current-password" required class="w-full" />
+      </div>
+      <button class="btn btn-primary w-full" type="submit">Log in</button>
+    </form>
+  </div>
+</Layout>

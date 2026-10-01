@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/client';
 import { copies, files, movies, wishlistItems, type Copy, type Format, type Movie, type Ownership } from '../db/schema';
+import { awaitingRip } from './rip-queue';
 import { getMovie, releaseYear, tmdbConfigured } from './tmdb';
 import { fulfillingCopy, planWishlistItem } from './wishlist';
 
@@ -226,6 +227,32 @@ export function loadLibrary(movieIds?: number[]): LibraryEntry[] {
     const hdr = fs.some((f) => f.hdr === 'dv') ? 'dv' : fs.some((f) => f.hdr === 'hdr10') ? 'hdr10' : 'none';
     return { ...m, copies: copyMap.get(m.id) ?? [], fileCount: fs.length, hdr, wish: wishMap.get(m.id) ?? null };
   });
+}
+
+export type RipQueueEntry = { copy: Copy; movie: Movie };
+
+/**
+ * Discs you own with no file in the library: what is left to rip. A file that went
+ * missing from Plex no longer counts, so a deleted rip puts its disc back on the list.
+ */
+export function ripQueue(): RipQueueEntry[] {
+  const withFile = new Set(
+    db
+      .select({ copyId: files.copyId })
+      .from(files)
+      .where(eq(files.missing, false))
+      .all()
+      .map((f) => f.copyId)
+      .filter((id): id is number => id !== null),
+  );
+  return db
+    .select({ copy: copies, movie: movies })
+    .from(copies)
+    .innerJoin(movies, eq(copies.movieId, movies.id))
+    .where(and(eq(copies.ownership, 'owned'), eq(copies.reviewStatus, 'confirmed')))
+    .orderBy(asc(movies.title))
+    .all()
+    .filter((r) => awaitingRip(r.copy, withFile.has(r.copy.id)));
 }
 
 export const reviewCount = () =>

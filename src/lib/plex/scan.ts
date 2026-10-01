@@ -4,8 +4,10 @@ import { and, eq, isNotNull, lt, or } from 'drizzle-orm';
 import { db } from '../../db/client';
 import { files, scanRuns, type ScanStats } from '../../db/schema';
 import { classify } from '../classify';
-import { addCopy, ensureMovie } from '../collection';
+import { addCopy, ensureMovie, movieCopies } from '../collection';
 import { config } from '../config';
+import { FORMAT_LABEL } from '../formats';
+import { discForNewFile } from '../rip-queue';
 import { baseName, dirName, normalizeRelPath, parsePlexNaming } from '../paths';
 import {
   getMovieDetails,
@@ -190,17 +192,32 @@ async function processItem(item: PlexMovie, stats: ScanStats, note: (l: string) 
       siblings: hints.siblings,
       nfoText: hints.nfoText,
     });
-    const { copy } = addCopy(movieId, {
-      format: c.format,
-      ownership: c.ownership,
-      edition,
-      origin: 'plex',
-      reviewStatus: 'needs_review',
-      suggestionReason: c.reasons.join('; '),
-      confidence: c.confidence,
-    });
+    // A rip of a disc you added by hand belongs to that disc. Its copy is already
+    // reviewed, so only the file is linked; the copy itself is left as you set it.
+    const linked = new Set(
+      db
+        .select({ copyId: files.copyId })
+        .from(files)
+        .where(and(eq(files.movieId, movieId), eq(files.missing, false)))
+        .all()
+        .map((f) => f.copyId)
+        .filter((id): id is number => id !== null),
+    );
+    const disc = discForNewFile(movieCopies(movieId), linked, { edition, format: c.format, ownership: c.ownership });
+    const copyId = disc
+      ? disc.id
+      : addCopy(movieId, {
+          format: c.format,
+          ownership: c.ownership,
+          edition,
+          origin: 'plex',
+          reviewStatus: 'needs_review',
+          suggestionReason: c.reasons.join('; '),
+          confidence: c.confidence,
+        }).copy.id;
+    if (disc) note(`Linked to your ${FORMAT_LABEL[disc.format]} disc: ${summary.relPath}`);
     db.insert(files)
-      .values({ ...common, movieId, copyId: copy.id, source: 'plex', hdr: hdr?.hdr ?? null, dvProfile: hdr?.dvProfile ?? null })
+      .values({ ...common, movieId, copyId, source: 'plex', hdr: hdr?.hdr ?? null, dvProfile: hdr?.dvProfile ?? null })
       .run();
     stats.newFiles++;
   }

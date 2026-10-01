@@ -1,0 +1,101 @@
+---
+import FormatBadge from '../components/FormatBadge.astro';
+import Poster from '../components/Poster.astro';
+import type { Format } from '../db/schema';
+import { ripQueue } from '../lib/collection';
+import { FORMAT_LABEL, FORMAT_RANK } from '../lib/formats';
+import Layout from '../layouts/Layout.astro';
+
+const qp = Astro.url.searchParams;
+const format = qp.get('format') ?? '';
+const sort = qp.get('sort') === 'added' ? 'added' : 'title';
+
+const all = ripQueue();
+const counts = Object.fromEntries((['uhd', 'bluray', 'dvd'] as Format[]).map((f) => [f, all.filter((r) => r.copy.format === f).length]));
+let rows = format ? all.filter((r) => r.copy.format === format) : all;
+rows =
+  sort === 'added'
+    ? [...rows].sort((a, b) => b.copy.createdAt.getTime() - a.copy.createdAt.getTime())
+    : [...rows].sort((a, b) => a.movie.title.localeCompare(b.movie.title) || FORMAT_RANK[b.copy.format] - FORMAT_RANK[a.copy.format]);
+
+const tabs = [
+  { value: '', label: 'All', n: all.length },
+  { value: 'uhd', label: FORMAT_LABEL.uhd, n: counts.uhd },
+  { value: 'bluray', label: FORMAT_LABEL.bluray, n: counts.bluray },
+  { value: 'dvd', label: FORMAT_LABEL.dvd, n: counts.dvd },
+];
+const href = (params: Record<string, string>) => {
+  const next = new URLSearchParams({ ...(format ? { format } : {}), ...(sort !== 'title' ? { sort } : {}), ...params });
+  for (const [k, v] of [...next]) if (!v) next.delete(k);
+  return `/to-rip${next.size ? `?${next}` : ''}`;
+};
+const fmt = (d: Date) => d.toLocaleDateString('en-GB', { dateStyle: 'medium' });
+---
+
+<Layout title="To rip">
+  <div class="mb-5 flex flex-wrap items-end justify-between gap-3">
+    <div>
+      <h1 class="text-2xl font-semibold tracking-tight">To rip</h1>
+      <p class="text-sm text-ink-400">
+        Discs you own with no file in the library. A disc drops off once its rip reaches the library, from media-pipeline or a Plex scan.
+      </p>
+    </div>
+    <a class="btn" href="/add/bulk">Add discs</a>
+  </div>
+
+  <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
+    <nav class="flex flex-wrap gap-1">
+      {
+        tabs.map((t) => (
+          <a
+            href={href({ format: t.value })}
+            class:list={[
+              'rounded-md px-3 py-1.5 text-sm',
+              format === t.value ? 'bg-ink-800 text-white' : 'text-ink-300 hover:bg-ink-850 hover:text-white',
+            ]}
+          >
+            {t.label} <span class="tabular-nums text-ink-500">{t.n}</span>
+          </a>
+        ))
+      }
+    </nav>
+    <div class="flex gap-1 text-sm">
+      <a href={href({ sort: '' })} class:list={['rounded-md px-2.5 py-1', sort === 'title' ? 'bg-ink-800 text-white' : 'text-ink-400 hover:text-white']}>A–Z</a>
+      <a href={href({ sort: 'added' })} class:list={['rounded-md px-2.5 py-1', sort === 'added' ? 'bg-ink-800 text-white' : 'text-ink-400 hover:text-white']}>Recently added</a>
+    </div>
+  </div>
+
+  {
+    rows.length === 0 ? (
+      <p class="card p-5 text-sm text-ink-400">
+        {all.length === 0 ? (
+          <>
+            Nothing left to rip. Add the discs on your shelf with <a class="text-accent hover:underline" href="/add/bulk">Add discs</a>, and they show up here until
+            they're in the library.
+          </>
+        ) : (
+          'No discs in this format left to rip.'
+        )}
+      </p>
+    ) : (
+      <ul class="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+        {rows.map(({ copy, movie }) => (
+          <li class="card flex gap-3 p-3">
+            <Poster path={movie.posterPath} title={movie.title} size="w185" class="w-14 shrink-0" />
+            <div class="min-w-0">
+              <a href={`/movie/${movie.tmdbId}`} class="font-medium hover:text-accent">
+                {movie.title}
+              </a>
+              {movie.year && <span class="text-sm text-ink-400"> {movie.year}</span>}
+              <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+                <FormatBadge format={copy.format} />
+                {copy.edition && <span class="chip bg-ink-700 text-ink-300">{copy.edition}</span>}
+              </div>
+              <p class="mt-1 text-xs text-ink-500">added {fmt(copy.createdAt)}</p>
+            </div>
+          </li>
+        ))}
+      </ul>
+    )
+  }
+</Layout>

@@ -60,7 +60,9 @@ const library = new Map(loadLibrary().map((m) => [m.tmdbId, m]));
 
 <Layout title="Add movie">
   <h1 class="mb-1 text-2xl font-semibold tracking-tight">Add a movie</h1>
-  <p class="mb-5 text-sm text-ink-400">Search TMDB, then add it to the collection or the wishlist.</p>
+  <p class="mb-5 text-sm text-ink-400">
+    Search TMDB, then add it to the collection or the wishlist. Adding a whole shelf? <a class="text-accent hover:underline" href="/add/bulk">Paste a list</a>.
+  </p>
 
   {!tmdbConfigured() && <p class="card mb-4 p-4 text-sm text-amber-200">TMDB_API_KEY is not set, so search is unavailable.</p>}
 

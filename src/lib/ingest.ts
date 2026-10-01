@@ -7,6 +7,7 @@ import { addCopy, ensureMovie, movieCopies, updateCopy } from './collection';
 import { config } from './config';
 import { editionKey, FORMAT_RANK } from './formats';
 import { baseName, normalizeRelPath, parsePlexNaming } from './paths';
+import { discForNewFile } from './rip-queue';
 
 export const ingestSchema = z.object({
   tmdb_id: z.number().int().positive().optional(),
@@ -76,10 +77,14 @@ export async function ingest(req: IngestRequest) {
       .filter((id): id is number => id !== null),
   );
 
-  // The copy this report is about: the one already backing the file, or a matching open one.
+  // The copy this report is about: the one already backing the file, a matching open
+  // one, or a disc you added by hand that this file is the rip of. compress_media.py
+  // sends no format, so without that last rule its encode of a disc you added would
+  // get a copy of its own and the disc would never leave the "to rip" list.
   const target =
     (existingFile?.copyId ? all.find((c) => c.id === existingFile.copyId) : undefined) ??
-    matchCopy(all, linked, edition, req.format ?? null);
+    matchCopy(all, linked, edition, req.format ?? null) ??
+    (req.file ? discForNewFile(all, linked, { edition, format, ownership: req.ownership }) : null);
 
   const copyValues = {
     format,

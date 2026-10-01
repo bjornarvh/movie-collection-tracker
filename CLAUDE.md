@@ -31,7 +31,7 @@ npm run db:generate  # after editing src/db/schema.ts
 - **`src/middleware.ts`** handles all auth.
   - API routes accept `Bearer` tokens.
   - Pages use the session cookie.
-  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes` or `/api`.
+  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip` or `/api`.
   - Cookie-authenticated writes need a same-origin `Origin`/`Referer`. Astro's own `checkOrigin` is off because it fails behind Caddy's TLS.
 - **Config is read from `process.env` at runtime** (`src/lib/config.ts`). Never read it from `import.meta.env`, which is inlined at build time.
 - **Data model:**
@@ -40,6 +40,13 @@ npm run db:generate  # after editing src/db/schema.ts
   - A file links to at most one copy.
   - Plex rescans only update technical fields on files. They never change a copy after it exists, so review decisions survive rescans.
   - `files.rel_path` (library-relative, forward slashes) is how Plex and media-pipeline reports meet (`src/lib/paths.ts`).
+- **To rip** (`/to-rip`, rules in `src/lib/rip-queue.ts`) lists owned, confirmed disc copies with no non-missing file.
+  - It is decided **per copy, not per movie**: a UHD you bought of a film whose library file is a download still needs ripping.
+  - Discs get there via `/add` or the bulk paste on `/add/bulk`.
+  - A disc only leaves the list if its rip is linked to *that* copy. So both ways a file arrives fall back to `discForNewFile`, which picks the disc a file plausibly came off: same edition, not named like a download, and no higher resolution than the disc.
+    - A new Plex file is linked to the disc instead of getting a needs-review copy of its own.
+    - In `ingest`, it is the last fallback, because `compress_media.py` sends no format.
+  - Attaching never edits the copy, so a 1080p encode of a UHD disc leaves the disc marked UHD.
 - **Wishlist rules** (`src/lib/wishlist.ts`): only `owned` + `confirmed` copies count. Format rank is dvd < digital < bluray < uhd.
 - **Guests must never see ownership (owned/pirated) or file paths.** Check `isAdmin` before rendering either.
 

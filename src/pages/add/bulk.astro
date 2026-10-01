@@ -1,0 +1,195 @@
+---
+import FormatBadge from '../../components/FormatBadge.astro';
+import Poster from '../../components/Poster.astro';
+import { FORMATS, type Format } from '../../db/schema';
+import { addCopy, ensureMovie, loadLibrary } from '../../lib/collection';
+import { back, oneOf, str } from '../../lib/forms';
+import { FORMAT_LABEL } from '../../lib/formats';
+import { mapLimit, parseBulkLine, type BulkLine } from '../../lib/rip-queue';
+import { getMovie, releaseYear, searchMovies, tmdbConfigured, type TmdbSearchResult } from '../../lib/tmdb';
+import Layout from '../../layouts/Layout.astro';
+
+const MAX_LINES = 300;
+const url = Astro.url;
+const DISC_FORMATS = FORMATS.filter((f) => f !== 'digital');
+
+type Row = { line: BulkLine; format: Format; candidates: TmdbSearchResult[]; error: string | null };
+
+/** TMDB candidates for one pasted line, best first. */
+async function lookup(line: BulkLine): Promise<TmdbSearchResult[]> {
+  if (line.tmdbId) {
+    const m = await getMovie(line.tmdbId);
+    return m ? [m] : [];
+  }
+  let found = await searchMovies(line.title, line.year ?? undefined);
+  // "Death Race 2000": the trailing number was part of the title, not the year.
+  if (!found.length && line.yearGuessed) found = await searchMovies(`${line.title} ${line.year}`);
+  if (!found.length && line.year) found = await searchMovies(line.title);
+  return found.slice(0, 6);
+}
+
+let text = '';
+let defaultFormat: Format = 'bluray';
+let rows: Row[] = [];
+let tooMany = 0;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  if (str(form, '_action') === 'add') {
+    // tmdb/format/edition arrive as parallel lists, one entry per row in document order.
+    const formats = form.getAll('format');
+    const editions = form.getAll('edition');
+    const picks = form.getAll('tmdb').flatMap((v, i) => {
+      const tmdbId = Number(v);
+      const format: Format | null = oneOf(DISC_FORMATS, String(formats[i] ?? ''));
+      if (!v || !Number.isInteger(tmdbId) || tmdbId <= 0 || !format) return [];
+      return [{ tmdbId, format, edition: String(editions[i] ?? '').trim() || null }];
+    });
+    const failed: string[] = [];
+    let added = 0;
+    let fulfilled = 0;
+    // Fetch new movies from TMDB a few at a time; inserting copies stays sequential.
+    const movies = await mapLimit(picks, 4, (p) => ensureMovie(p.tmdbId).catch((e: Error) => e));
+    picks.forEach((p, i) => {
+      const m = movies[i];
+      if (m instanceof Error) {
+        failed.push(`TMDB ${p.tmdbId}: ${m.message}`);
+        return;
+      }
+      const res = addCopy(m.movie.id, { format: p.format, ownership: 'owned', edition: p.edition, origin: 'manual', reviewStatus: 'confirmed' });
+      added++;
+      fulfilled += res.fulfilled.length;
+    });
+    const ok = `Added ${added} disc${added === 1 ? '' : 's'}.${fulfilled ? ` ${fulfilled} wishlist item${fulfilled === 1 ? '' : 's'} fulfilled.` : ''}`;
+    return back(new URL('/to-rip', url), failed.length ? { ok, err: `Not added: ${failed.slice(0, 5).join('; ')}` } : { ok });
+  }
+
+  // Preview: match every line on TMDB, then render the review table below.
+  text = String(form.get('list') ?? '');
+  defaultFormat = oneOf(DISC_FORMATS, str(form, 'default_format')) ?? 'bluray';
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => parseBulkLine(l))
+    .filter((l): l is BulkLine => l !== null);
+  tooMany = Math.max(0, lines.length - MAX_LINES);
+  rows = await mapLimit(lines.slice(0, MAX_LINES), 4, async (line) => {
+    const format = line.format ?? defaultFormat;
+    try {
+      return { line, format, candidates: await lookup(line), error: null };
+    } catch (e) {
+      return { line, format, candidates: [], error: (e as Error).message };
+    }
+  });
+}
+
+const library = new Map(loadLibrary().map((m) => [m.tmdbId, m]));
+/** Copies you already have of this movie, for spotting a disc you added before. */
+const haveAlready = (tmdbId: number | undefined, format: Format) =>
+  tmdbId !== undefined && (library.get(tmdbId)?.copies ?? []).some((c) => c.format === format && c.ownership === 'owned');
+const matched = rows.filter((r) => r.candidates.length > 0).length;
+---
+
+<Layout title="Add discs">
+  <h1 class="mb-1 text-2xl font-semibold tracking-tight">Add discs</h1>
+  <p class="mb-5 text-sm text-ink-400">
+    Paste the discs on your shelf, one per line. They're added as owned copies and listed under <a class="text-accent hover:underline" href="/to-rip">To rip</a>
+    until the rip reaches the library. For a single movie, <a class="text-accent hover:underline" href="/add">search instead</a>.
+  </p>
+
+  {!tmdbConfigured() && <p class="card mb-4 p-4 text-sm text-amber-200">TMDB_API_KEY is not set, so movies can't be matched.</p>}
+
+  {
+    rows.length === 0 ? (
+      <form method="post" class="card space-y-3 p-5">
+        <input type="hidden" name="_action" value="preview" />
+        <textarea
+          name="list"
+          rows="14"
+          required
+          class="w-full font-mono"
+          placeholder={'Heat (1995) uhd\nThe Thing 1982 Blu-ray\nAmélie\tDVD\nhttps://www.themoviedb.org/movie/949'}
+        >{text}</textarea>
+        <p class="text-xs text-ink-500">
+          Each line is a title, optionally followed by a year and a format (UHD / 4K, Blu-ray / BD, DVD), in any order. Tab-separated columns from a spreadsheet work,
+          and so does a TMDB link. Up to {MAX_LINES} lines; lines starting with # are skipped.
+        </p>
+        <div class="flex flex-wrap items-center gap-3">
+          <label for="default_format">Format when a line has none</label>
+          <select id="default_format" name="default_format">
+            {DISC_FORMATS.map((f) => (
+              <option value={f} selected={f === defaultFormat}>
+                {FORMAT_LABEL[f]}
+              </option>
+            ))}
+          </select>
+          <button class="btn btn-primary ml-auto" disabled={!tmdbConfigured()}>
+            Match on TMDB
+          </button>
+        </div>
+      </form>
+    ) : (
+      <form method="post">
+        <input type="hidden" name="_action" value="add" />
+        <div class="mb-3 flex flex-wrap items-center justify-between gap-3">
+          <p class="text-sm text-ink-400">
+            Matched {matched} of {rows.length} lines. Check each match, then add them. Discs you already have are set to skip.
+            {tooMany > 0 && <span class="text-amber-200"> {tooMany} lines over the limit were left out.</span>}
+          </p>
+          <div class="flex gap-2">
+            <a class="btn" href="/add/bulk">Start over</a>
+            <button class="btn btn-primary">Add selected</button>
+          </div>
+        </div>
+        <div class="card divide-y divide-ink-800">
+          {rows.map((r) => {
+            const top = r.candidates[0];
+            const dup = haveAlready(top?.id, r.format);
+            return (
+              <div class="flex flex-wrap items-center gap-3 p-3">
+                <Poster path={top?.poster_path ?? null} title={top?.title ?? r.line.raw} size="w185" class="w-10 shrink-0" />
+                <div class="min-w-48 flex-1">
+                  <p class="truncate font-mono text-xs text-ink-500">{r.line.raw}</p>
+                  {r.candidates.length ? (
+                    <select name="tmdb" aria-label="Movie" class="mt-1 w-full max-w-md">
+                      {r.candidates.map((c, i) => (
+                        <option value={c.id} selected={i === 0 && !dup}>
+                          {c.title}
+                          {releaseYear(c) ? ` (${releaseYear(c)})` : ''}
+                          {c.original_title && c.original_title !== c.title ? ` · ${c.original_title}` : ''}
+                        </option>
+                      ))}
+                      <option value="" selected={dup}>
+                        — skip —
+                      </option>
+                    </select>
+                  ) : (
+                    <>
+                      <input type="hidden" name="tmdb" value="" />
+                      <p class="mt-1 text-sm text-red-300">{r.error ?? 'No match on TMDB. Add it with search instead.'}</p>
+                    </>
+                  )}
+                  {dup && top && (
+                    <p class="mt-1 flex items-center gap-1.5 text-xs text-ink-400">
+                      Already in your collection as <FormatBadge format={r.format} />
+                    </p>
+                  )}
+                </div>
+                <select name="format" aria-label="Format">
+                  {DISC_FORMATS.map((f) => (
+                    <option value={f} selected={f === r.format}>
+                      {FORMAT_LABEL[f]}
+                    </option>
+                  ))}
+                </select>
+                <input name="edition" placeholder="Edition" class="w-32" />
+              </div>
+            );
+          })}
+        </div>
+        <div class="mt-3 flex justify-end">
+          <button class="btn btn-primary">Add selected</button>
+        </div>
+      </form>
+    )
+  }
+</Layout>

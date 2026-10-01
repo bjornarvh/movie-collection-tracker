@@ -58,7 +58,7 @@ const stateStyle: Record<string, string> = {
 </Layout>
 
 <script>
-  // Refresh the current-batch card in place: every 5 s while a batch is live, every
+  // Refresh the current-batch card in place: every second while a batch is live, every
   // 30 s otherwise so a newly started batch still shows up without a reload.
   const box = document.getElementById('current-encode')!;
   const live = () => box.querySelector('[data-encode-state]')?.getAttribute('data-encode-state') === 'running';
@@ -77,7 +77,7 @@ const stateStyle: Record<string, string> = {
         // offline or server restarting; try again next tick
       }
     }
-    setTimeout(refresh, live() ? 5000 : 30000);
+    setTimeout(refresh, live() ? 1000 : 30000);
   }
-  setTimeout(refresh, live() ? 5000 : 30000);
+  setTimeout(refresh, live() ? 1000 : 30000);
 </script>

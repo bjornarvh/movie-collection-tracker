@@ -19,7 +19,7 @@ npm run db:generate  # after editing src/db/schema.ts
   - Keep it that way unless a page really needs interactivity.
 - **The /encodes poller doesn't render anything itself.**
   - It fetches `/encodes/current`, a `partial` Astro page holding the same `CurrentEncode` component, and swaps it in.
-  - It polls every 5 s while a batch is live and every 30 s otherwise, so a newly started batch shows up without a reload.
+  - It polls every second while a batch is live (the pipeline sends progress once a second too) and every 30 s otherwise, so a newly started batch shows up without a reload.
 - **Encode tracking** (`encode_runs` and `encode_jobs`, `src/lib/encodes.ts`) is fed live by media-pipeline's `compress_media.py`.
   - `POST /api/v1/encodes` registers the batch and its queue.
   - `PATCH /api/v1/encodes/{run}/jobs/{job}` reports status and progress, changing only the fields sent.

@@ -155,6 +155,61 @@ export const scanRuns = sqliteTable('scan_runs', {
   log: text('log'),
 });
 
+export const ENCODE_RUN_STATUSES = ['running', 'finished', 'aborted'] as const;
+export const ENCODE_JOB_STATUSES = ['queued', 'running', 'done', 'skipped', 'failed'] as const;
+export type EncodeJobStatus = (typeof ENCODE_JOB_STATUSES)[number];
+
+/** One `compress_media.py` batch, reported live by media-pipeline. */
+export const encodeRuns = sqliteTable('encode_runs', {
+  id: integer('id').primaryKey({ autoIncrement: true }),
+  host: text('host').notNull(),
+  inputRoot: text('input_root'),
+  outputRoot: text('output_root'),
+  encoder: text('encoder'),
+  options: text('options', { mode: 'json' }).$type<Record<string, unknown>>(),
+  status: text('status', { enum: ENCODE_RUN_STATUSES }).notNull(),
+  startedAt: timestamp('started_at').notNull().default(now),
+  finishedAt: timestamp('finished_at'),
+  /** Bumped by every report; a running batch that goes quiet is shown as stalled. */
+  lastSeenAt: timestamp('last_seen_at').notNull().default(now),
+  done: integer('done').notNull().default(0),
+  skipped: integer('skipped').notNull().default(0),
+  failed: integer('failed').notNull().default(0),
+});
+
+/** One output file of a batch. A stacked multi-part movie is a single job. */
+export const encodeJobs = sqliteTable(
+  'encode_jobs',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    runId: integer('run_id')
+      .notNull()
+      .references(() => encodeRuns.id, { onDelete: 'cascade' }),
+    position: integer('position').notNull(),
+    /** Output path relative to the library root, forward slashes. */
+    relPath: text('rel_path').notNull(),
+    parts: integer('parts').notNull().default(1),
+    tmdbId: integer('tmdb_id'),
+    status: text('status', { enum: ENCODE_JOB_STATUSES }).notNull().default('queued'),
+    stage: text('stage'),
+    percent: real('percent'),
+    speed: real('speed'),
+    fps: real('fps'),
+    outTimeS: real('out_time_s'),
+    durationS: real('duration_s'),
+    description: text('description'),
+    error: text('error'),
+    sizeBytes: integer('size_bytes'),
+    gbPerHour: real('gb_per_hour'),
+    startedAt: timestamp('started_at'),
+    finishedAt: timestamp('finished_at'),
+  },
+  (t) => [index('encode_jobs_run_idx').on(t.runId, t.position)],
+);
+
+export type EncodeRun = typeof encodeRuns.$inferSelect;
+export type EncodeJob = typeof encodeJobs.$inferSelect;
+
 export type Movie = typeof movies.$inferSelect;
 export type Copy = typeof copies.$inferSelect;
 export type MediaFile = typeof files.$inferSelect;

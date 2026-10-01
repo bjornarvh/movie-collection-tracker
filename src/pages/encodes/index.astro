@@ -1,0 +1,83 @@
+---
+import CurrentEncode from '../../components/CurrentEncode.astro';
+import EncodeJobTable from '../../components/EncodeJobTable.astro';
+import Layout from '../../layouts/Layout.astro';
+import { formatDuration, runState } from '../../lib/encode-progress';
+import { recentRuns } from '../../lib/encodes';
+
+const runs = recentRuns(21);
+const [latest, ...history] = runs;
+const fmt = (d: Date) => d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+const stateStyle: Record<string, string> = {
+  running: 'text-amber-300',
+  stalled: 'text-red-300',
+  finished: 'text-emerald-300',
+  aborted: 'text-red-300',
+};
+---
+
+<Layout title="Encodes">
+  <h1 class="mb-6 text-2xl font-semibold tracking-tight">Encodes</h1>
+
+  <div id="current-encode" class="mb-8">
+    <CurrentEncode run={latest ?? null} />
+  </div>
+
+  {
+    history.length > 0 && (
+      <section>
+        <h2 class="mb-3 text-lg font-semibold">History</h2>
+        <div class="card divide-y divide-ink-800">
+          {history.map((r) => {
+            const state = runState(r);
+            const end = r.finishedAt ?? r.lastSeenAt;
+            return (
+              <details class="group">
+                <summary class="flex cursor-pointer flex-wrap items-center gap-x-4 gap-y-1 px-4 py-3 text-sm hover:bg-ink-850">
+                  <span class="w-40 tabular-nums">{fmt(r.startedAt)}</span>
+                  <span class:list={['w-16', stateStyle[state]]}>{state}</span>
+                  <span class="muted">{r.host}</span>
+                  <span class="tabular-nums">
+                    {r.jobs.filter((j) => j.status === 'done').length} encoded · {r.jobs.filter((j) => j.status === 'skipped').length} skipped
+                    {r.jobs.some((j) => j.status === 'failed') && (
+                      <span class="text-red-300"> · {r.jobs.filter((j) => j.status === 'failed').length} failed</span>
+                    )}
+                  </span>
+                  <span class="muted ml-auto tabular-nums">{formatDuration((end.getTime() - r.startedAt.getTime()) / 1000)}</span>
+                </summary>
+                <div class="px-2 pb-3">
+                  <EncodeJobTable jobs={r.jobs} />
+                </div>
+              </details>
+            );
+          })}
+        </div>
+      </section>
+    )
+  }
+</Layout>
+
+<script>
+  // Refresh the current-batch card in place: every 5 s while a batch is live, every
+  // 30 s otherwise so a newly started batch still shows up without a reload.
+  const box = document.getElementById('current-encode')!;
+  const live = () => box.querySelector('[data-encode-state]')?.getAttribute('data-encode-state') === 'running';
+
+  async function refresh() {
+    if (!document.hidden) {
+      try {
+        const res = await fetch('/encodes/current', { headers: { accept: 'text/html' } });
+        if (res.ok && !res.redirected) {
+          const wasLive = live();
+          box.innerHTML = await res.text();
+          // A batch just ended: reload once so it moves into the history list.
+          if (wasLive && !live()) return location.reload();
+        }
+      } catch {
+        // offline or server restarting; try again next tick
+      }
+    }
+    setTimeout(refresh, live() ? 5000 : 30000);
+  }
+  setTimeout(refresh, live() ? 5000 : 30000);
+</script>

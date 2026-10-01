@@ -14,11 +14,24 @@ npm run db:generate  # after editing src/db/schema.ts
 
 ## Architecture
 
-- **Server-rendered Astro pages** handle their own form POSTs in the frontmatter, then redirect back with `?ok=`/`?err=` flash messages (`src/lib/forms.ts`). The only client JS is the select-all script on /review. Keep it that way unless a page really needs interactivity.
+- **Server-rendered Astro pages** handle their own form POSTs in the frontmatter, then redirect back with `?ok=`/`?err=` flash messages (`src/lib/forms.ts`).
+  - Client JS exists in only two places: the select-all script on /review, and the poller on /encodes.
+  - Keep it that way unless a page really needs interactivity.
+- **The /encodes poller doesn't render anything itself.**
+  - It fetches `/encodes/current`, a `partial` Astro page holding the same `CurrentEncode` component, and swaps it in.
+  - It polls every 5 s while a batch is live and every 30 s otherwise, so a newly started batch shows up without a reload.
+- **Encode tracking** (`encode_runs` and `encode_jobs`, `src/lib/encodes.ts`) is fed live by media-pipeline's `compress_media.py`.
+  - `POST /api/v1/encodes` registers the batch and its queue.
+  - `PATCH /api/v1/encodes/{run}/jobs/{job}` reports status and progress, changing only the fields sent.
+  - `PATCH /api/v1/encodes/{run}` finishes the batch. With `{}` it is a heartbeat.
+  - `GET /api/v1/encodes/current` returns the newest batch.
+  - A running batch quiet for 10 min is shown as **stalled**. That is computed at read time, so it needs no cron (`runState`).
+  - The next batch from the same host closes stalled batches as aborted.
+  - Pure logic lives in `encode-progress.ts`, which has no db import, so vitest can load it.
 - **`src/middleware.ts`** handles all auth.
   - API routes accept `Bearer` tokens.
   - Pages use the session cookie.
-  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades` or `/api`.
+  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes` or `/api`.
   - Cookie-authenticated writes need a same-origin `Origin`/`Referer`. Astro's own `checkOrigin` is off because it fails behind Caddy's TLS.
 - **Config is read from `process.env` at runtime** (`src/lib/config.ts`). Never read it from `import.meta.env`, which is inlined at build time.
 - **Data model:**

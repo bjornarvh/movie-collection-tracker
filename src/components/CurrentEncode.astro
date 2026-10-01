@@ -1,0 +1,103 @@
+---
+import type { RunWithJobs } from '../lib/encodes';
+import { formatDuration, jobEta, runPercent, runState } from '../lib/encode-progress';
+import { baseName } from '../lib/paths';
+import EncodeJobTable from './EncodeJobTable.astro';
+
+interface Props {
+  run: RunWithJobs | null;
+}
+
+const { run } = Astro.props;
+const now = new Date();
+const state = run ? runState(run, now) : 'none';
+const current = run?.jobs.find((j) => j.status === 'running');
+const overall = run ? runPercent(run.jobs) : 0;
+const eta = current ? jobEta(current) : null;
+const counts = run
+  ? {
+      done: run.jobs.filter((j) => j.status === 'done').length,
+      left: run.jobs.filter((j) => j.status === 'queued' || j.status === 'running').length,
+      failed: run.jobs.filter((j) => j.status === 'failed').length,
+    }
+  : null;
+const ended = run?.finishedAt ?? (state === 'stalled' ? run?.lastSeenAt : now);
+const elapsed = run && ended ? formatDuration((ended.getTime() - run.startedAt.getTime()) / 1000) : '';
+const fmt = (d: Date) => d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+const options = run?.options
+  ? Object.entries(run.options)
+      .filter(([, v]) => v !== null && v !== false && v !== undefined)
+      .map(([k, v]) => (v === true ? k : `${k} ${v}`))
+  : [];
+const stateStyle: Record<string, string> = {
+  running: 'bg-accent text-ink-950',
+  stalled: 'bg-red-900 text-red-200',
+  finished: 'bg-emerald-900 text-emerald-200',
+  aborted: 'bg-red-900 text-red-200',
+};
+---
+
+<section class="card p-5" data-encode-state={state}>
+  {
+    !run ? (
+      <p class="muted text-sm">
+        No encodes reported yet. Set <code class="text-ink-300">TRACKER_URL</code> and <code class="text-ink-300">TRACKER_TOKEN</code> for
+        media-pipeline and start a batch; it shows up here.
+      </p>
+    ) : (
+      <>
+        <div class="mb-4 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 class="flex items-center gap-2 text-lg font-semibold">
+              {state === 'running' ? 'Encoding' : 'Last batch'}
+              <span class:list={['chip', stateStyle[state]]}>{state}</span>
+            </h2>
+            <p class="text-sm text-ink-400">
+              {run.host} · started {fmt(run.startedAt)} · {elapsed}
+              {run.encoder && <> · {run.encoder}</>}
+              {options.length > 0 && <> · {options.join(', ')}</>}
+            </p>
+            {state === 'stalled' && (
+              <p class="mt-1 text-sm text-red-300">No report since {fmt(run.lastSeenAt)}. The batch was probably killed.</p>
+            )}
+          </div>
+          <div class="text-right text-sm tabular-nums">
+            <div class="text-2xl font-semibold">{overall.toFixed(0)}%</div>
+            <div class="muted">
+              {counts!.done} done · {counts!.left} left{counts!.failed > 0 && <span class="text-red-300"> · {counts!.failed} failed</span>}
+            </div>
+          </div>
+        </div>
+        <div class="mb-5 h-1.5 overflow-hidden rounded-full bg-ink-800">
+          <div class="h-full bg-ink-400" style={`width: ${overall.toFixed(2)}%`} />
+        </div>
+
+        {current && (
+          <div class="mb-5 rounded-lg border border-ink-800 bg-ink-850 p-4">
+            <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <span class="font-medium">{baseName(current.relPath)}</span>
+              <span class="text-sm tabular-nums">{current.percent != null ? `${current.percent.toFixed(1)}%` : 'starting…'}</span>
+            </div>
+            <div class="mb-2 h-2.5 overflow-hidden rounded-full bg-ink-800">
+              <div class="h-full bg-accent transition-[width] duration-1000" style={`width: ${(current.percent ?? 0).toFixed(2)}%`} />
+            </div>
+            <p class="text-xs text-ink-400 tabular-nums">
+              {[
+                current.stage,
+                current.speed != null && `${current.speed.toFixed(2)}x`,
+                current.fps != null && `${current.fps.toFixed(0)} fps`,
+                current.durationS && `${formatDuration(current.outTimeS)} of ${formatDuration(current.durationS)}`,
+                eta != null && `~${formatDuration(eta)} left`,
+                current.description,
+              ]
+                .filter(Boolean)
+                .join(' · ')}
+            </p>
+          </div>
+        )}
+
+        <EncodeJobTable jobs={run.jobs} />
+      </>
+    )
+  }
+</section>

@@ -1,0 +1,70 @@
+---
+import type { EncodeJob } from '../db/schema';
+import { formatBytes, formatDuration } from '../lib/encode-progress';
+import { baseName, dirName } from '../lib/paths';
+
+interface Props {
+  jobs: EncodeJob[];
+}
+
+const { jobs } = Astro.props;
+
+const chip: Record<EncodeJob['status'], string> = {
+  queued: 'bg-ink-700 text-ink-300',
+  running: 'bg-accent text-ink-950',
+  done: 'bg-emerald-900 text-emerald-200',
+  skipped: 'bg-ink-800 text-ink-400',
+  failed: 'bg-red-900 text-red-200',
+};
+const elapsed = (j: EncodeJob) =>
+  j.startedAt && j.finishedAt ? formatDuration((j.finishedAt.getTime() - j.startedAt.getTime()) / 1000) : '';
+---
+
+<div class="overflow-x-auto">
+  <table class="table">
+    <thead>
+      <tr>
+        <th class="w-20">Status</th>
+        <th>File</th>
+        <th class="text-right">Runtime</th>
+        <th class="text-right">Took</th>
+        <th class="text-right">Size</th>
+        <th class="text-right">GB/h</th>
+      </tr>
+    </thead>
+    <tbody>
+      {
+        jobs.map((j) => (
+          <tr class:list={[j.status === 'skipped' && 'text-ink-400']}>
+            <td>
+              <span class:list={['chip', chip[j.status]]}>{j.status}</span>
+            </td>
+            <td class="min-w-0">
+              <span class="font-medium">
+                {j.tmdbId ? (
+                  <a href={`/movie/${j.tmdbId}`} class="hover:underline">
+                    {baseName(j.relPath)}
+                  </a>
+                ) : (
+                  baseName(j.relPath)
+                )}
+              </span>
+              {j.parts > 1 && <span class="muted text-xs"> · {j.parts} parts</span>}
+              <span class="block text-xs text-ink-500">
+                {dirName(j.relPath)}
+                {j.description && <> · {j.description}</>}
+              </span>
+              {j.error && <span class="block text-xs text-red-300">{j.error}</span>}
+            </td>
+            <td class="text-right whitespace-nowrap tabular-nums">{formatDuration(j.durationS)}</td>
+            <td class="text-right whitespace-nowrap tabular-nums">
+              {j.status === 'running' ? (j.percent != null ? `${j.percent.toFixed(1)}%` : '…') : elapsed(j)}
+            </td>
+            <td class="text-right whitespace-nowrap tabular-nums">{formatBytes(j.sizeBytes)}</td>
+            <td class="text-right whitespace-nowrap tabular-nums">{j.gbPerHour != null ? j.gbPerHour.toFixed(2) : ''}</td>
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+</div>

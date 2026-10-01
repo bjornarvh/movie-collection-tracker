@@ -3,11 +3,14 @@
 FROM node:22-alpine AS build
 # Toolchain for native modules (better-sqlite3) when no prebuilt binary matches.
 RUN apk add --no-cache python3 make g++
+# Keep in step with "packageManager" in package.json. Installed with npm rather
+# than corepack, whose bundled signing keys lag behind new pnpm releases.
+RUN npm install -g pnpm@12.8.1
 WORKDIR /app
-COPY package.json package-lock.json ./
-RUN npm ci
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 COPY . .
-RUN npm run build && npm prune --omit=dev
+RUN pnpm run build && pnpm prune --prod
 
 FROM node:22-alpine
 RUN apk add --no-cache tini sqlite su-exec

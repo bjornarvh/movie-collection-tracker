@@ -61,7 +61,9 @@ const stateStyle: Record<string, string> = {
   // Refresh the current-batch card in place: every second while a batch is live, every
   // 30 s otherwise so a newly started batch still shows up without a reload.
   const box = document.getElementById('current-encode')!;
-  const live = () => box.querySelector('[data-encode-state]')?.getAttribute('data-encode-state') === 'running';
+  const card = () => box.querySelector('[data-encode-state]');
+  const live = () => card()?.getAttribute('data-encode-state') === 'running';
+  const runId = () => card()?.getAttribute('data-encode-run') ?? '';
 
   async function refresh() {
     if (!document.hidden) {
@@ -69,9 +71,11 @@ const stateStyle: Record<string, string> = {
         const res = await fetch('/encodes/current', { headers: { accept: 'text/html' } });
         if (res.ok && !res.redirected) {
           const wasLive = live();
+          const wasRun = runId();
           box.innerHTML = await res.text();
-          // A batch just ended: reload once so it moves into the history list.
-          if (wasLive && !live()) return location.reload();
+          // The history list is rendered once, at page load. Reload when a batch ends
+          // or a new one starts, so the batch that was showing moves into it.
+          if ((wasLive && !live()) || runId() !== wasRun) return location.reload();
         }
       } catch {
         // offline or server restarting; try again next tick

@@ -37,7 +37,7 @@ const stateStyle: Record<string, string> = {
 };
 ---
 
-<section class="card p-5" data-encode-state={state}>
+<section class="card p-5" data-encode-state={state} data-encode-run={run?.id ?? ''}>
   {
     !run ? (
       <p class="muted text-sm">

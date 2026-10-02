@@ -67,6 +67,68 @@ export async function getMovieDetails(ratingKey: string) {
   return mc.Metadata?.[0] ?? null;
 }
 
+// The watchlist lives on plex.tv, not the local server, and belongs to the account behind PLEX_TOKEN.
+const DISCOVER = 'https://discover.provider.plex.tv';
+
+async function discover<T>(pathname: string, method: 'GET' | 'PUT' = 'GET'): Promise<T | null> {
+  if (!config.plexToken) throw new PlexError('PLEX_TOKEN is not configured');
+  const res = await fetch(DISCOVER + pathname, {
+    method,
+    headers: { Accept: 'application/json', 'X-Plex-Token': config.plexToken, 'X-Plex-Client-Identifier': 'movie-collection-tracker' },
+    signal: AbortSignal.timeout(10_000),
+  });
+  if (res.status === 401) throw new PlexError('plex.tv rejected the token (401)');
+  if (!res.ok) throw new PlexError(`plex.tv ${pathname.split('?')[0]} failed: ${res.status}`);
+  return method === 'GET' ? ((await res.json()) as { MediaContainer: T }).MediaContainer : null;
+}
+
+// tmdbId -> plex.tv ratingKey. The mapping never changes, so it is safe to keep for the process lifetime.
+const ratingKeys = new Map<number, string | null>();
+
+async function plexRatingKey(tmdbId: number) {
+  if (!ratingKeys.has(tmdbId)) {
+    const mc = await discover<{ Metadata?: { ratingKey: string }[] }>(
+      `/library/metadata/matches?type=1&guid=${encodeURIComponent(`tmdb://${tmdbId}`)}`,
+    );
+    ratingKeys.set(tmdbId, mc?.Metadata?.[0]?.ratingKey ?? null);
+  }
+  return ratingKeys.get(tmdbId)!;
+}
+
+/** Whether the movie is on the Plex watchlist; `found: false` when plex.tv doesn't know the TMDB id. */
+export async function getWatchlistState(tmdbId: number) {
+  const ratingKey = await plexRatingKey(tmdbId);
+  if (!ratingKey) return { found: false as const };
+  const mc = await discover<{ UserState?: { watchlistedAt?: number }[] }>(`/library/metadata/${ratingKey}/userState`);
+  return { found: true as const, watchlisted: Boolean(mc?.UserState?.[0]?.watchlistedAt) };
+}
+
+/** TMDB ids of every movie on the Plex watchlist, for pages that list many movies at once. */
+export async function getWatchlistTmdbIds() {
+  const ids = new Set<number>();
+  const size = 100;
+  for (let start = 0; ; start += size) {
+    const mc = await discover<{ totalSize?: number; Metadata?: (PlexMovie & { type: string })[] }>(
+      `/library/sections/watchlist/all?includeGuids=1&X-Plex-Container-Start=${start}&X-Plex-Container-Size=${size}`,
+    );
+    for (const m of mc?.Metadata ?? []) {
+      // TMDB numbers movies and shows separately, so a show's id could collide with a movie's.
+      const tmdbId = m.type === 'movie' ? tmdbIdFromGuids(m.Guid) : null;
+      if (tmdbId) {
+        ids.add(tmdbId);
+        ratingKeys.set(tmdbId, m.ratingKey);
+      }
+    }
+    if (start + size >= (mc?.totalSize ?? 0)) return ids;
+  }
+}
+
+export async function setWatchlisted(tmdbId: number, on: boolean) {
+  const ratingKey = await plexRatingKey(tmdbId);
+  if (!ratingKey) throw new PlexError('Plex has no match for this TMDB id.');
+  await discover(`/actions/${on ? 'addToWatchlist' : 'removeFromWatchlist'}?ratingKey=${ratingKey}`, 'PUT');
+}
+
 export function tmdbIdFromGuids(guids: { id: string }[] | undefined) {
   const g = guids?.find((x) => x.id.startsWith('tmdb://'));
   const n = g ? Number(g.id.slice('tmdb://'.length)) : NaN;

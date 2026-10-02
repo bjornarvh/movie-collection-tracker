@@ -3,8 +3,8 @@
 Tracks which movies you own and in which format (DVD, Blu-ray, 4K UHD, digital), whether a copy is owned or pirated, and a wishlist of new movies and upgrades. Metadata and posters come from TMDB. The Plex library is imported and rescanned nightly. media-pipeline reports new rips and encodes through a small API.
 
 - **Collection:** a poster grid or table, filtered by format, ownership, HDR/Dolby Vision, editions and wishlist.
-- **Movie page:** copies (format, ownership, edition, notes), the Plex files behind each copy, and wishlist controls.
-- **Wishlist:** each item has a target of "Blu-ray is enough" or "4K only". Items are *new* or *upgrade* (you already own a lower format). An item is fulfilled automatically when a confirmed, owned copy in that format or better shows up.
+- **Movie page:** copies (format, ownership, edition, notes), the Plex files behind each copy, wishlist controls, and a button to add the movie to or remove it from your Plex watchlist (the plex.tv account behind `PLEX_TOKEN`).
+- **Wishlist:** each item has a target of "Blu-ray is enough" or "4K only". Items are *new* or *upgrade* (you already own a lower format). An item is fulfilled automatically when a confirmed, owned copy in that format or better shows up. Each row also has a Plex watchlist toggle.
 - **Upgrades:** movies you have on DVD only, pirated only, Blu-ray (4K candidates) or digital only, each with one-click wishlisting.
 - **Review:** the Plex import guesses format and ownership from resolution, file naming (release groups, media-pipeline and MakeMKV names) and `.nfo` files. You confirm in bulk. Nothing counts as owned until it's confirmed.
 - **Users:** you are the admin. Guests can browse the collection and wishlist but never see ownership or file paths.
@@ -32,7 +32,7 @@ Schema changes: edit `src/db/schema.ts`, then run `npm run db:generate`. Migrati
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | `admin` / — | Creates the first admin when none exists |
 | `TMDB_API_KEY` | — | v4 read token (`eyJ…`) or v3 key |
 | `TMDB_LANGUAGE` | `en-US` | |
-| `PLEX_URL` / `PLEX_TOKEN` | `http://host.docker.internal:32400` / — | |
+| `PLEX_URL` / `PLEX_TOKEN` | `http://host.docker.internal:32400` / — | The token is also used against plex.tv for the watchlist |
 | `PLEX_SECTIONS` | all movie sections | Comma-separated titles or keys |
 | `SCAN_CRON` | `30 4 * * *` | Nightly Plex rescan + TMDB refresh; empty disables it |
 | `MEDIA_ROOT` | `/media` | Media mount used to read `.nfo` hints; empty disables it |

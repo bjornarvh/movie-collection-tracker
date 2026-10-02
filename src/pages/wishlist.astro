@@ -7,6 +7,7 @@ import { copies, movies, wishlistItems } from '../db/schema';
 import { addToWishlist, removeWishlistItem } from '../lib/collection';
 import { backWithQuery, int, str, targetOf } from '../lib/forms';
 import { bestOwned, TARGET_LABEL } from '../lib/formats';
+import { getWatchlistTmdbIds, setWatchlisted } from '../lib/plex/client';
 import Layout from '../layouts/Layout.astro';
 
 const isAdmin = Astro.locals.user?.role === 'admin';
@@ -19,9 +20,20 @@ if (Astro.request.method === 'POST' && isAdmin) {
     .where(eq(wishlistItems.id, int(form, 'item_id') ?? -1))
     .get();
   if (!item) return backWithQuery(Astro.url, { err: 'Unknown wishlist item.' });
-  if (str(form, '_action') === 'remove') {
+  const action = str(form, '_action');
+  if (action === 'remove') {
     removeWishlistItem(item.id);
     return backWithQuery(Astro.url, { ok: 'Removed.' });
+  }
+  if (action === 'plex_watchlist' || action === 'plex_unwatchlist') {
+    const movie = db.select().from(movies).where(eq(movies.id, item.movieId)).get()!;
+    const on = action === 'plex_watchlist';
+    try {
+      await setWatchlisted(movie.tmdbId, on);
+      return backWithQuery(Astro.url, { ok: `${movie.title} ${on ? 'added to' : 'removed from'} Plex watchlist.` });
+    } catch (e) {
+      return backWithQuery(Astro.url, { err: (e as Error).message });
+    }
   }
   const target = targetOf(form) ?? item.targetFormat;
   const res = addToWishlist(item.movieId, target, { priority: int(form, 'priority') ?? item.priority, notes: str(form, 'notes') || null });
@@ -54,6 +66,8 @@ const done =
         .all()
     : [];
 const rows = tab === 'new' ? newItems : tab === 'upgrade' ? upgradeItems : done;
+// One plex.tv round trip for the whole list. null hides the buttons if plex.tv is unreachable.
+const plexWatched = isAdmin ? await getWatchlistTmdbIds().catch(() => null) : null;
 const priorityLabel = ['', 'High', 'Normal', 'Low'];
 const tabs = [
   { key: 'new', label: 'New movies', count: newItems.length },
@@ -116,6 +130,17 @@ const tabs = [
                 {item.fulfilledAt && <span>Fulfilled {item.fulfilledAt.toLocaleDateString('en-GB')}</span>}
               </div>
             </div>
+            {
+              plexWatched && (
+                <form method="post" class="shrink-0">
+                  <input type="hidden" name="item_id" value={item.id} />
+                  <input type="hidden" name="_action" value={plexWatched.has(movie.tmdbId) ? 'plex_unwatchlist' : 'plex_watchlist'} />
+                  <button class="btn btn-sm" title={plexWatched.has(movie.tmdbId) ? 'Remove from Plex watchlist' : 'Add to Plex watchlist'}>
+                    {plexWatched.has(movie.tmdbId) ? '✓ Plex' : '+ Plex'}
+                  </button>
+                </form>
+              )
+            }
             {
               isAdmin && tab !== 'done' && (
                 <details class="relative shrink-0">

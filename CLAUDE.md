@@ -48,12 +48,18 @@ CI runs `pnpm test` and `pnpm run check` on every push and PR. A push to `main` 
 - **`/subtitles` drives subgen-cli on the desktop.** The task types are `subtitle-scan`, `transcribe`, `translate`, `fix-names`, `prepare-series` and `proofread`; the worker builds the commands in `worker_subgen.py`.
   - **The page reads the newest `subtitle-scan` task's result.** That's a JSON scan of `D:\Video` from subgen-cli's `series_status.py`. A scan is queued after every subtitle step (`afterSubtitleTask`, de-duplicated), and older scans' results are nulled so the table doesn't keep copies.
   - **"Run all" queues a chain** (`runAllSteps`): only the steps that apply, and the proofread is a one-episode pilot on a series with nothing proofread yet.
+- **`/triage` lists the desktop's MakeMKV rip folders** (`workers.rips`, with a still-ripping reason). The flow:
+  1. **Propose** queues `triage-propose`: Claude, headless, plans but can't move. Its result carries the plan rows, questions, problems and report.
+  2. **Answers** queue another proposal that resumes the same Claude session.
+  3. **Approve and move** queues `triage-apply`. It's only offered for a proposal without problems, and open questions need "apply anyway".
+
+  The page refuses any action on a rip that's still ripping, or one that already has a triage task open.
 - **Chains are generic.** A task with `parent_id` is claimable only once its parent is `done` (`chainState`). When a parent fails, is cancelled, or dies with a worker restart, its queued descendants are cancelled with a reason. The handoff → server encode follow-up uses the same parent link.
 - **`tasks.progress` holds the line the child keeps redrawing** (ffmpeg, yt-dlp, the current Claude tool call). It's shown live on `/tasks/{id}` and cleared when the task ends.
 - **`src/middleware.ts`** handles all auth.
   - API routes accept `Bearer` tokens.
   - Pages use the session cookie.
-  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks`, `/reencode`, `/download`, `/subtitles` or `/api`.
+  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks`, `/reencode`, `/download`, `/subtitles`, `/triage` or `/api`.
   - Cookie-authenticated writes need a same-origin `Origin`/`Referer`. Astro's own `checkOrigin` is off because it fails behind Caddy's TLS.
 - **Config is read from `process.env` at runtime** (`src/lib/config.ts`). Never read it from `import.meta.env`, which is inlined at build time.
 - **Data model:**

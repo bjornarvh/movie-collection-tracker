@@ -1,0 +1,209 @@
+---
+import { ZodError } from 'zod';
+import type { Task } from '../db/schema';
+import Layout from '../layouts/Layout.astro';
+import { formatBytes } from '../lib/formats';
+import { back, str } from '../lib/forms';
+import { taskState, workerOnline, type TriageProposal } from '../lib/task-queue';
+import { enqueue, getWorker, triageTasks } from '../lib/tasks';
+
+const url = Astro.url;
+const desktop = getWorker('desktop');
+const rips = desktop?.rips ?? [];
+const all = triageTasks();
+const forFolder = (folder: string) => all.filter((t) => (t.params as { folder?: string }).folder === folder);
+/** The newest finished proposal for a rip, with its parsed result. */
+const latestProposal = (folder: string) => {
+  const task = forFolder(folder).find((t) => t.type === 'triage-propose' && t.finishedAt && t.result);
+  return task ? { task, proposal: task.result as unknown as TriageProposal } : null;
+};
+const openTask = (folder: string) => forFolder(folder).find((t) => t.status === 'queued' || t.status === 'running') ?? null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const folder = str(form, 'folder');
+  const rip = rips.find((r) => r.folder === folder);
+  if (!rip) return back(url, { err: 'That rip is not on the desktop (any more).' });
+  if (rip.ripping) return back(url, { err: `Still ripping: ${rip.ripping}` });
+  if (openTask(folder)) return back(url, { err: 'A triage task for this rip is already queued or running.' });
+  try {
+    switch (str(form, '_action')) {
+      case 'propose':
+        enqueue('triage-propose', 'desktop', { folder });
+        return back(url, { ok: `Claude is triaging ${folder}. This takes a few minutes.` });
+      case 'answer': {
+        const latest = latestProposal(folder);
+        if (!latest?.proposal.session_id) return back(url, { err: 'No proposal to continue; propose again.' });
+        enqueue('triage-propose', 'desktop', { folder, resume: latest.proposal.session_id, answers: str(form, 'answers') });
+        return back(url, { ok: `Sent your answers; Claude is updating the plan for ${folder}.` });
+      }
+      case 'apply': {
+        const latest = latestProposal(folder);
+        if (!latest || latest.task.status !== 'done' || !latest.proposal.plan.length || latest.proposal.problems.length) {
+          return back(url, { err: 'Only a proposal without problems can be applied.' });
+        }
+        if (latest.proposal.questions.length && form.get('despite_questions') !== 'on') {
+          return back(url, { err: 'Claude still has questions. Answer them, or tick "apply anyway".' });
+        }
+        enqueue('triage-apply', 'desktop', { folder });
+        return back(url, { ok: `Applying the plan for ${folder}.` });
+      }
+      default:
+        return back(url, { err: 'Unknown action.' });
+    }
+  } catch (e) {
+    if (e instanceof ZodError) return back(url, { err: e.issues.map((i) => i.message).join('; ') });
+    throw e;
+  }
+}
+
+const now = new Date();
+const canTriage = desktop?.capabilities.includes('triage-propose') ?? false;
+const applied = all.filter((t) => t.type === 'triage-apply' && t.status === 'done').slice(0, 10);
+const leaf = (p: string) => p.split(/[\\/]/).at(-1) ?? p;
+const age = (s: number) => (s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`);
+const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const stateOf = (t: Task) => taskState(t, now);
+---
+
+<Layout title="Triage">
+  <h1 class="mb-2 text-2xl font-semibold tracking-tight">Rip triage</h1>
+  <p class="mb-4 max-w-3xl text-sm text-ink-400">
+    Finished MakeMKV rips in D:\Video. Claude identifies each title with the rip-triage skill and proposes where it goes (into
+    <code class="text-ink-300">_to_encode</code> named for Plex, or <code class="text-ink-300">_rip_leftovers</code> with the reason in the
+    name), but cannot move anything. You answer its questions and approve; then triage.py moves the files with its own checks. A rip that is
+    still being written is never touched. Contact sheets and the full report are in <code class="text-ink-300">D:\Video\_triage\&lt;disc&gt;</code>.
+  </p>
+  {
+    !canTriage && (
+      <p class="mb-4 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-2.5 text-sm text-amber-200">
+        The desktop worker hasn't reported triage support yet{desktop && !workerOnline(desktop, now) ? ' (it is offline)' : ''}.
+      </p>
+    )
+  }
+  {rips.length === 0 && <p class="card p-5 text-sm text-ink-400">No rips waiting in D:\Video.</p>}
+
+  <div class="space-y-4">
+    {
+      rips.map((rip) => {
+        const open = openTask(rip.folder);
+        const latest = latestProposal(rip.folder);
+        const p = latest?.proposal;
+        const canApply = !!p && latest!.task.status === 'done' && p.plan.length > 0 && p.problems.length === 0;
+        return (
+          <section class="card p-4">
+            <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <h2 class="text-lg font-semibold">{rip.folder}</h2>
+              <span class="text-sm text-ink-400">
+                {rip.titles} titles · {formatBytes(rip.bytes)} · last written {age(rip.ageS)} ago
+              </span>
+            </div>
+            {rip.ripping && <p class="mb-2 text-sm text-amber-300">Still ripping: {rip.ripping}</p>}
+            {open && (
+              <p class="mb-2 text-sm">
+                <a href={`/tasks/${open.id}`} class="text-amber-300 hover:underline">
+                  {stateOf(open)}: {open.title}
+                </a>
+              </p>
+            )}
+
+            {p && (
+              <div class="mb-3 space-y-3">
+                <p class="text-xs text-ink-500">
+                  Proposal from {fmt(latest!.task.finishedAt)} ·{' '}
+                  <a href={`/tasks/${latest!.task.id}`} class="hover:underline">
+                    task log
+                  </a>
+                </p>
+                {p.problems.length > 0 && (
+                  <ul class="rounded-md border border-red-800 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+                    {p.problems.map((x) => (
+                      <li>{x}</li>
+                    ))}
+                  </ul>
+                )}
+                {p.plan.length > 0 && (
+                  <table class="table">
+                    <thead>
+                      <tr>
+                        <th>Title</th>
+                        <th>Goes to</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {p.plan.map(([from, to]) => (
+                        <tr>
+                          <td class="whitespace-nowrap text-xs">{leaf(from)}</td>
+                          <td class:list={['text-xs', to.startsWith('_rip_leftovers') ? 'text-ink-400' : 'text-emerald-200']}>{to}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                <details>
+                  <summary class="cursor-pointer text-xs text-ink-400">Claude's report</summary>
+                  <pre class="mt-1 max-h-96 overflow-auto rounded-lg bg-ink-950 p-3 text-xs whitespace-pre-wrap text-ink-300">{p.report}</pre>
+                </details>
+              </div>
+            )}
+
+            {p && p.questions.length > 0 && !open && (
+              <form method="post" class="mb-3 space-y-2 rounded-lg border border-sky-900 bg-sky-950/30 p-3">
+                <input type="hidden" name="_action" value="answer" />
+                <input type="hidden" name="folder" value={rip.folder} />
+                <p class="text-sm font-medium text-sky-200">Claude asks:</p>
+                <ol class="list-decimal space-y-1 pl-5 text-sm text-ink-200">
+                  {p.questions.map((q) => (
+                    <li>{q}</li>
+                  ))}
+                </ol>
+                <textarea name="answers" required rows="3" class="w-full" placeholder="Your answers, in order" />
+                <button class="btn btn-sm">Send answers</button>
+              </form>
+            )}
+
+            {!open && !rip.ripping && (
+              <div class="flex flex-wrap items-center gap-2">
+                <form method="post">
+                  <input type="hidden" name="_action" value="propose" />
+                  <input type="hidden" name="folder" value={rip.folder} />
+                  <button class:list={['btn btn-sm', !p && 'btn-primary']}>{p ? 'Propose again' : 'Propose a triage'}</button>
+                </form>
+                {canApply && (
+                  <form method="post" class="flex items-center gap-2" onsubmit="return confirm('Move these files now?')">
+                    <input type="hidden" name="_action" value="apply" />
+                    <input type="hidden" name="folder" value={rip.folder} />
+                    {p!.questions.length > 0 && (
+                      <label class="flex items-center gap-1 text-xs">
+                        <input type="checkbox" name="despite_questions" /> apply anyway
+                      </label>
+                    )}
+                    <button class="btn btn-sm btn-primary">Approve and move</button>
+                  </form>
+                )}
+              </div>
+            )}
+          </section>
+        );
+      })
+    }
+  </div>
+
+  {
+    applied.length > 0 && (
+      <section class="card mt-6 p-4">
+        <h2 class="mb-2 text-sm font-semibold text-ink-300">Recently applied</h2>
+        <ul class="text-sm">
+          {applied.map((t) => (
+            <li>
+              <a href={`/tasks/${t.id}`} class="hover:underline">
+                {(t.params as { folder?: string }).folder}
+              </a>{' '}
+              <span class="text-xs text-ink-500">{fmt(t.finishedAt)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
+    )
+  }
+</Layout>

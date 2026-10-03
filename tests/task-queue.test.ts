@@ -5,6 +5,8 @@ import {
   chainState,
   runAllSteps,
   subtitleParams,
+  triageApplyParams,
+  triageProposeParams,
   heldOriginals,
   matchesQuery,
   heldParams,
@@ -275,5 +277,17 @@ describe('chains', () => {
     const going = runAllSteps({ counts: { episodes: 10, proofread: 3 }, notes: true, names: true }, 'x', 5);
     expect(going[3].params).toEqual({ slug: 'x', lang: 'no', unproofread: true });
     expect(going.at(-1)!.params).toEqual({ slug: 'x', count: 5 });
+  });
+});
+
+describe('triage params', () => {
+  it('needs answers to continue a session, and a plain folder', () => {
+    expect(triageProposeParams.parse({ folder: 'HEAT_DISC' })).toEqual({ folder: 'HEAT_DISC', resume: null, answers: null });
+    const resume = '0f2c4e0a-1b2c-4d5e-8f90-a1b2c3d4e5f6';
+    expect(triageProposeParams.safeParse({ folder: 'HEAT_DISC', resume, answers: 'Theatrical.' }).success).toBe(true);
+    expect(triageProposeParams.safeParse({ folder: 'HEAT_DISC', resume }).success).toBe(false);
+    expect(triageProposeParams.safeParse({ folder: 'HEAT_DISC', resume: 'nope', answers: 'x' }).success).toBe(false);
+    expect(triageApplyParams.safeParse({ folder: '../Windows' }).success).toBe(false);
+    expect(taskTitle('triage-propose', { folder: 'HEAT_DISC', resume })).toBe('Triage proposal (answers): HEAT_DISC');
   });
 });

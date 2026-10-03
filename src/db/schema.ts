@@ -224,6 +224,8 @@ export const workers = sqliteTable('workers', {
   inventory: text('inventory', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
   /** Show and season folders per library it can re-encode, e.g. {"TV Shows": ["Shogun {tmdb-1}/Season 01"]}. */
   libraries: text('libraries', { mode: 'json' }).$type<Record<string, string[]>>().notNull().default(sql`'{}'`),
+  /** MakeMKV rip folders it has (desktop), with a reason when one looks unfinished. */
+  rips: text('rips', { mode: 'json' }).$type<RipInfo[]>().notNull().default(sql`'[]'`),
   /** Paused workers keep running what they have but claim nothing new. */
   paused: integer('paused', { mode: 'boolean' }).notNull().default(false),
   /** Local hours it may start tasks, e.g. "22-7"; null = any time. */
@@ -231,8 +233,11 @@ export const workers = sqliteTable('workers', {
   lastSeenAt: timestamp('last_seen_at'),
 });
 
+export type RipInfo = { folder: string; titles: number; bytes: number; ageS: number; ripping: string | null };
+
 export const TASK_TYPES = ['encode', 'handoff', 'reencode', 'purge-original', 'restore-original', 'ytdlp',
-  'subtitle-scan', 'transcribe', 'translate', 'fix-names', 'prepare-series', 'proofread'] as const;
+  'subtitle-scan', 'transcribe', 'translate', 'fix-names', 'prepare-series', 'proofread',
+  'triage-propose', 'triage-apply'] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_STATUSES = ['queued', 'running', 'done', 'failed', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];

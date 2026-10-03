@@ -34,10 +34,10 @@ export function claimNext(name: string, req: ClaimRequest, now = new Date()): Ta
   return db.transaction((tx) => {
     const worker = tx
       .insert(workers)
-      .values({ name, capabilities: req.capabilities, inventory: req.inventory, libraries: req.libraries, lastSeenAt: now })
+      .values({ name, capabilities: req.capabilities, inventory: req.inventory, libraries: req.libraries, rips: req.rips, lastSeenAt: now })
       .onConflictDoUpdate({
         target: workers.name,
-        set: { capabilities: req.capabilities, inventory: req.inventory, libraries: req.libraries, lastSeenAt: now },
+        set: { capabilities: req.capabilities, inventory: req.inventory, libraries: req.libraries, rips: req.rips, lastSeenAt: now },
       })
       .returning()
       .get();
@@ -242,6 +242,17 @@ export function enqueueChain(worker: string, steps: { type: TaskType; params: Re
     parent = task.id;
   }
   return queued;
+}
+
+/** Triage tasks per rip folder, newest first. */
+export function triageTasks(): Task[] {
+  return db
+    .select()
+    .from(tasks)
+    .where(inArray(tasks.type, ['triage-propose', 'triage-apply']))
+    .orderBy(desc(tasks.id))
+    .limit(200)
+    .all();
 }
 
 /** A queued task is dropped at once; a running one is told to stop on its next report. */

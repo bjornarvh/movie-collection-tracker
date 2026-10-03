@@ -142,6 +142,29 @@ export const subtitleParams = {
   proofread: series.extend({ slug: notesSlug, count: z.number().int().min(1).max(10).default(5) }),
 };
 
+// ---- rip triage (desktop; media-pipeline triage_run.py) ---------------------
+
+export const triageProposeParams = z
+  .object({
+    folder: folderName,
+    /** Continue an earlier proposal's Claude session with the owner's answers. */
+    resume: z.uuid().nullable().default(null),
+    answers: z.string().trim().max(4000).nullable().default(null),
+  })
+  .refine((p) => !p.resume || !!p.answers, 'answers are needed to continue a triage');
+
+export const triageApplyParams = z.object({ folder: folderName });
+
+/** triage_run.py propose's --result. */
+export type TriageProposal = {
+  folder: string;
+  session_id: string | null;
+  report: string;
+  plan: [string, string][];
+  questions: string[];
+  problems: string[];
+};
+
 export type EncodeParams = z.infer<typeof encodeParams>;
 export type HandoffParams = z.infer<typeof handoffParams>;
 export type ReencodeParams = z.infer<typeof reencodeParams>;
@@ -154,6 +177,8 @@ export const PARAMS: Record<TaskType, z.ZodType> = {
   'restore-original': heldParams,
   ytdlp: ytdlpParams,
   ...subtitleParams,
+  'triage-propose': triageProposeParams,
+  'triage-apply': triageApplyParams,
 };
 
 // ---- re-encode results -----------------------------------------------------
@@ -267,6 +292,7 @@ export function taskTitle(
     lang?: string;
     dryRun?: boolean;
     count?: number;
+    resume?: string | null;
     then?: { mode?: string } | null;
   },
 ) {
@@ -293,6 +319,10 @@ export function taskTitle(
       return `Prepare notes: ${params.series}`;
     case 'proofread':
       return `Proofread next ${params.count ?? 5}: ${params.series}`;
+    case 'triage-propose':
+      return `Triage proposal${params.resume ? ' (answers)' : ''}: ${params.folder}`;
+    case 'triage-apply':
+      return `Apply triage: ${params.folder}`;
     case 'ytdlp':
       return `Download${params.mode === 'list' ? ' (list only)' : ''}: ${params.folder}`;
     default:
@@ -306,6 +336,18 @@ export const claimSchema = z.object({
   capabilities: z.array(z.string().max(50)).max(50).default([]),
   inventory: z.array(z.string().max(255)).max(2000).default([]),
   libraries: z.record(z.string().max(100), z.array(z.string().max(600)).max(2000)).default({}),
+  rips: z
+    .array(
+      z.object({
+        folder: z.string().max(255),
+        titles: z.number().int().nonnegative(),
+        bytes: z.number().nonnegative(),
+        ageS: z.number().int(),
+        ripping: z.string().max(500).nullable(),
+      }),
+    )
+    .max(200)
+    .default([]),
 });
 
 export const taskUpdateSchema = z.object({

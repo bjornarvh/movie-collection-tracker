@@ -1,0 +1,1 @@
+ALTER TABLE `workers` ADD `rips` text DEFAULT '[]' NOT NULL;

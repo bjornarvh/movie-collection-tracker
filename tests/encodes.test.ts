@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  currentRuns,
   formatDuration,
   jobEta,
   jobUpdateSchema,
@@ -112,5 +113,21 @@ describe('formatDuration', () => {
     expect(formatDuration(65)).toBe('1m 05s');
     expect(formatDuration(9.4)).toBe('9s');
     expect(formatDuration(null)).toBe('');
+  });
+});
+
+describe('currentRuns', () => {
+  it('shows every running batch, newest first', () => {
+    const runs = [
+      { id: 3, status: 'running' as const },
+      { id: 2, status: 'finished' as const },
+      { id: 1, status: 'running' as const },
+    ];
+    expect(currentRuns(runs).map((r) => r.id)).toEqual([3, 1]);
+  });
+
+  it('falls back to the newest batch when none is running', () => {
+    expect(currentRuns([{ id: 2, status: 'finished' as const }, { id: 1, status: 'aborted' as const }]).map((r) => r.id)).toEqual([2]);
+    expect(currentRuns([])).toEqual([]);
   });
 });

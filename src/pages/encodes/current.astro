@@ -1,10 +1,13 @@
 ---
 import CurrentEncode from '../../components/CurrentEncode.astro';
-import { latestRun } from '../../lib/encodes';
+import { liveRuns } from '../../lib/encodes';
 
-// An HTML fragment, not a page: /encodes polls it to refresh the current batch in place,
+// An HTML fragment, not a page: /encodes polls it to refresh the live batches in place,
 // so the markup lives in one component instead of being rebuilt in client JS.
 export const partial = true;
+const runs = liveRuns();
 ---
 
-<CurrentEncode run={latestRun()} />
+<div class="space-y-4">
+  {runs.length ? runs.map((run) => <CurrentEncode run={run} />) : <CurrentEncode run={null} />}
+</div>

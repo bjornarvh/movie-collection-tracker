@@ -3,10 +3,13 @@ import CurrentEncode from '../../components/CurrentEncode.astro';
 import EncodeJobTable from '../../components/EncodeJobTable.astro';
 import Layout from '../../layouts/Layout.astro';
 import { formatDuration, runState } from '../../lib/encode-progress';
-import { recentRuns } from '../../lib/encodes';
+import { liveRuns, recentRuns } from '../../lib/encodes';
 
-const runs = recentRuns(21);
-const [latest, ...history] = runs;
+// Every running batch gets a live card (desktop and server can encode at once);
+// the history below is everything else.
+const live = liveRuns();
+const liveIds = new Set(live.map((r) => r.id));
+const history = recentRuns(21).filter((r) => !liveIds.has(r.id));
 const fmt = (d: Date) => d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
 const stateStyle: Record<string, string> = {
   running: 'text-amber-300',
@@ -19,8 +22,8 @@ const stateStyle: Record<string, string> = {
 <Layout title="Encodes">
   <h1 class="mb-6 text-2xl font-semibold tracking-tight">Encodes</h1>
 
-  <div id="current-encode" class="mb-8">
-    <CurrentEncode run={latest ?? null} />
+  <div id="current-encode" class="mb-8 space-y-4">
+    {live.length ? live.map((run) => <CurrentEncode run={run} />) : <CurrentEncode run={null} />}
   </div>
 
   {
@@ -58,12 +61,12 @@ const stateStyle: Record<string, string> = {
 </Layout>
 
 <script>
-  // Refresh the current-batch card in place: every second while a batch is live, every
+  // Refresh the live batch cards in place: every second while any batch is live, every
   // 30 s otherwise so a newly started batch still shows up without a reload.
   const box = document.getElementById('current-encode')!;
-  const card = () => box.querySelector('[data-encode-state]');
-  const live = () => card()?.getAttribute('data-encode-state') === 'running';
-  const runId = () => card()?.getAttribute('data-encode-run') ?? '';
+  const cards = () => [...box.querySelectorAll('[data-encode-state]')];
+  const live = () => cards().some((c) => c.getAttribute('data-encode-state') === 'running');
+  const runId = () => cards().map((c) => c.getAttribute('data-encode-run') ?? '').join(',');
 
   async function refresh() {
     if (!document.hidden) {
@@ -73,8 +76,8 @@ const stateStyle: Record<string, string> = {
           const wasLive = live();
           const wasRun = runId();
           box.innerHTML = await res.text();
-          // The history list is rendered once, at page load. Reload when a batch ends
-          // or a new one starts, so the batch that was showing moves into it.
+          // The history list is rendered once, at page load. Reload when the last live
+          // batch ends or the set of live batches changes, so a finished one moves into it.
           if ((wasLive && !live()) || runId() !== wasRun) return location.reload();
         }
       } catch {

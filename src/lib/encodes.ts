@@ -2,7 +2,7 @@ import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client';
 import { encodeJobs, encodeRuns, type EncodeJob, type EncodeRun } from '../db/schema';
 import { config } from './config';
-import { isTerminal, type JobUpdate, type RunUpdate, type StartRunRequest } from './encode-progress';
+import { currentRuns, isTerminal, type JobUpdate, type RunUpdate, type StartRunRequest } from './encode-progress';
 import { normalizeRelPath, parsePlexNaming } from './paths';
 
 export type RunWithJobs = EncodeRun & { jobs: EncodeJob[] };
@@ -142,6 +142,12 @@ function withJobs(runs: EncodeRun[]): RunWithJobs[] {
     .orderBy(asc(encodeJobs.position))
     .all();
   return runs.map((r) => ({ ...r, jobs: jobs.filter((j) => j.runId === r.id) }));
+}
+
+/** The batches /encodes shows as live cards: all running ones, else the newest. */
+export function liveRuns(): RunWithJobs[] {
+  const running = db.select().from(encodeRuns).where(eq(encodeRuns.status, 'running')).orderBy(desc(encodeRuns.id)).all();
+  return currentRuns(running.length ? withJobs(running) : recentRuns(1));
 }
 
 export function latestRun(): RunWithJobs | null {

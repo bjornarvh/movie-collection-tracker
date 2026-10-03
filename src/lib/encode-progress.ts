@@ -61,6 +61,17 @@ export function runState(run: Pick<EncodeRun, 'status' | 'lastSeenAt'>, now = ne
   return now.getTime() - run.lastSeenAt.getTime() > STALL_AFTER_MS ? 'stalled' : 'running';
 }
 
+/**
+ * Which runs get a live card on /encodes: every batch still marked running
+ * (the desktop and the server can encode at the same time, and a quiet one
+ * shows as stalled), or, when none is, the newest batch as "Last batch".
+ * `runs` is newest first.
+ */
+export function currentRuns<R extends Pick<EncodeRun, 'status'>>(runs: R[]): R[] {
+  const running = runs.filter((r) => r.status === 'running');
+  return running.length ? running : runs.slice(0, 1);
+}
+
 export const isTerminal = (status: EncodeJob['status']) => status === 'done' || status === 'skipped' || status === 'failed';
 
 /** Seconds left on a running job, from ffmpeg's position and speed; null when unknown. */

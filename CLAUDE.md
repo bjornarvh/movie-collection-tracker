@@ -24,7 +24,8 @@ CI runs `pnpm test` and `pnpm run check` on every push and PR. A push to `main` 
   - Keep it that way unless a page really needs interactivity.
 - **The /encodes poller doesn't render anything itself.**
   - It fetches `/encodes/current`, a `partial` Astro page holding the same `CurrentEncode` component, and swaps it in.
-  - It polls every second while a batch is live (the pipeline sends progress once a second too) and every 30 s otherwise, so a newly started batch shows up without a reload.
+  - **Every running batch gets a live card** (`liveRuns`, rule in `currentRuns`): the desktop and the server can encode at the same time. When nothing runs, the newest batch shows as "Last batch". The history lists everything else.
+  - It polls every second while any batch is live (the pipeline sends progress once a second too) and every 30 s otherwise, so a newly started batch shows up without a reload. It reloads the page when the set of live batches changes, so a finished one moves into the history.
 - **Encode tracking** (`encode_runs` and `encode_jobs`, `src/lib/encodes.ts`) is fed live by media-pipeline's `compress_media.py`.
   - `POST /api/v1/encodes` registers the batch and its queue.
   - `PATCH /api/v1/encodes/{run}/jobs/{job}` reports status and progress, changing only the fields sent.

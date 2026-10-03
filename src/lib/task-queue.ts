@@ -67,6 +67,8 @@ export const reencodeParams = z.object({
   quality: z.number().int().min(10).max(35).nullable().default(null),
   /** Re-encode HEVC sources too (normally skipped). */
   force: z.boolean().default(false),
+  /** For a show or season: encode at most this many episodes (skipped HEVC ones don't count). */
+  limit: z.number().int().min(1).max(500).nullable().default(null),
 });
 
 /** A library file path held in _replaced: "<library>/<folder>[/<season>]/<file>.mkv". */

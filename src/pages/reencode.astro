@@ -12,19 +12,25 @@ import { enqueue, getWorker, listHeldOriginals, openReencodeTasks } from '../lib
 
 const url = Astro.url;
 const tab = url.searchParams.get('tab') === 'tv' ? 'tv' : 'movies';
-const showAll = url.searchParams.get('all') === '1';
+// HEVC files are listed by default: many re-encodes are a resize or a lower
+// quality, where an HEVC source is as good a candidate as a remux.
+const showAll = url.searchParams.get('hevc') !== '0';
 const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
-const keep = ['tab', 'all', 'q'];
+const keep = ['tab', 'hevc', 'q'];
 
 function options(form: FormData) {
   const maxHeight = str(form, 'max_height');
   const quality = str(form, 'quality');
+  const mode = str(form, 'mode') === 'full' ? 'full' : 'test';
+  const limit = str(form, 'limit');
   return {
-    mode: str(form, 'mode') === 'full' ? 'full' : 'test',
+    mode,
     film: form.get('film') === 'on',
     force: form.get('force') === 'on',
     maxHeight: maxHeight === '' ? null : Number(maxHeight),
     quality: quality === '' ? null : Number(quality),
+    // Episodes per show/season task: a test needs one sample, a full run all.
+    limit: limit === '' ? (mode === 'test' ? 1 : null) : Number(limit),
   };
 }
 
@@ -65,7 +71,7 @@ if (Astro.request.method === 'POST') {
         const chosen = new Set(form.getAll('file').map(String));
         const valid = movieFiles().filter((f) => chosen.has(f.relPath));
         if (!valid.length) return back(url, { err: 'Tick at least one file.' }, keep);
-        const opts = options(form);
+        const opts = { ...options(form), limit: null };
         for (const f of valid) {
           const [, folder, file] = f.relPath.split('/');
           enqueue('reencode', 'server', { library: 'Movies', folder, file, ...opts });
@@ -104,11 +110,15 @@ if (Astro.request.method === 'POST') {
 const server = getWorker('server');
 const canReencode = server?.capabilities.includes('reencode') ?? false;
 const open = openReencodeTasks();
+// Open tasks per file or folder, shown next to it. A file may be queued again
+// (test samples with different settings, say), so this only informs.
 const openByPath = new Map<string, string>();
+const openCount = new Map<string, number>();
 for (const t of open) {
   const p = t.params as { library?: string; folder?: string; file?: string | null; relPath?: string };
   const key = p.relPath ?? [p.library, p.folder, p.file].filter(Boolean).join('/');
-  openByPath.set(key, t.status);
+  openCount.set(key, (openCount.get(key) ?? 0) + 1);
+  openByPath.set(key, openCount.get(key)! > 1 ? `${openCount.get(key)} tasks queued` : t.status);
 }
 const held = listHeldOriginals();
 const heldBytes = held.reduce((sum, h) => sum + ((h.kind === 'original' ? h.oldSize : h.newSize) ?? 0), 0);
@@ -126,7 +136,7 @@ const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'med
 const link = (params: { tab?: string; all?: boolean; q?: string }) => {
   const next = new URLSearchParams();
   next.set('tab', params.tab ?? tab);
-  if (params.all ?? showAll) next.set('all', '1');
+  if (!(params.all ?? showAll)) next.set('hevc', '0');
   if ((params.q ?? q) !== '') next.set('q', params.q ?? q);
   return `/reencode?${next}`;
 };
@@ -139,6 +149,8 @@ const link = (params: { tab?: string; all?: boolean; q?: string }) => {
     <code class="text-ink-300">_replaced</code> and stays there until you delete or restore it below. The usual track policy applies: only the
     original-language and Norwegian audio (best track each) and Norwegian/English subtitles are kept, so commentaries, other dubs and
     compatibility tracks are dropped. Each encode needs free space of roughly 70% of the source while it runs. HEVC files are skipped unless forced.
+    A file can be queued more than once: test samples are named after their settings (e.g. <code class="text-ink-300">sample_Heat.x265-crf20.mkv</code>)
+    so two configurations can be compared; a second full re-encode is refused while that file's original is held.
   </p>
   {
     !canReencode && (
@@ -154,7 +166,7 @@ const link = (params: { tab?: string; all?: boolean; q?: string }) => {
     <a href={link({ tab: 'tv' })} class:list={['btn btn-sm', tab === 'tv' && 'btn-primary']}>TV Shows</a>
     <form method="get" class="flex items-center gap-2">
       <input type="hidden" name="tab" value={tab} />
-      {showAll && <input type="hidden" name="all" value="1" />}
+      {!showAll && <input type="hidden" name="hevc" value="0" />}
       <input type="search" name="q" value={q} placeholder={tab === 'tv' ? 'Search shows' : 'Search movies'} class="w-56 py-1" aria-label="Search" />
       <button class="btn btn-sm">Search</button>
       {q && <a href={link({ q: '' })} class="text-xs text-ink-400 hover:underline">clear</a>}
@@ -162,7 +174,7 @@ const link = (params: { tab?: string; all?: boolean; q?: string }) => {
     {
       tab === 'movies' && (
         <a href={link({ all: !showAll })} class="btn btn-sm ml-auto">
-          {showAll ? 'Hide HEVC files' : 'Show HEVC files too'}
+          {showAll ? 'Hide HEVC files' : 'Show HEVC files'}
         </a>
       )
     }
@@ -191,7 +203,15 @@ const link = (params: { tab?: string; all?: boolean; q?: string }) => {
         </select>
       </div>
       <label class="flex items-center gap-2 pb-2"><input type="checkbox" name="film" /> --film</label>
-      <label class="flex items-center gap-2 pb-2"><input type="checkbox" name="force" /> include HEVC</label>
+      {
+        tab === 'tv' && (
+          <div class="space-y-1">
+            <label for="limit">Episodes</label>
+            <input id="limit" name="limit" type="number" min="1" max="500" placeholder="test 1 · full all" class="w-32" />
+          </div>
+        )
+      }
+      <label class="flex items-center gap-2 pb-2"><input type="checkbox" name="force" checked /> include HEVC</label>
       <button class="btn btn-primary">Queue ticked</button>
     </div>
 
@@ -221,7 +241,7 @@ const link = (params: { tab?: string; all?: boolean; q?: string }) => {
                 return (
                   <tr>
                     <td>
-                      <input type="checkbox" name="file" value={f.relPath} disabled={!!busy || isHeld} aria-label={`Select ${f.title}`} />
+                      <input type="checkbox" name="file" value={f.relPath} aria-label={`Select ${f.title}`} />
                     </td>
                     <td>
                       <a href={`/movie/${f.tmdbId}`} class="hover:underline">
@@ -260,7 +280,7 @@ const link = (params: { tab?: string; all?: boolean; q?: string }) => {
             const busy = openByPath.get(`TV Shows/${folder}`);
             return (
               <li class:list={['flex items-center gap-3 px-4 py-1.5', season && 'pl-10']}>
-                <input type="checkbox" name="folder" value={folder} disabled={!!busy} aria-label={`Select ${folder}`} />
+                <input type="checkbox" name="folder" value={folder} aria-label={`Select ${folder}`} />
                 <span class:list={[!season && 'font-medium']}>{season ? folder.split('/')[1] : folder}</span>
                 {!season && <span class="text-xs text-ink-500">whole show</span>}
                 {busy && <span class="text-xs text-amber-300">{busy}</span>}

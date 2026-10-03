@@ -133,6 +133,8 @@ describe('re-encode params', () => {
   it('accepts a movie file and a TV season', () => {
     expect(reencodeParams.parse({ library: 'Movies', folder: 'Heat (1995) {tmdb-949}', file: 'Heat (1995).mkv' }).mode).toBe('test');
     expect(reencodeParams.parse({ library: 'TV Shows', folder: 'Shogun {tmdb-1}/Season 01' }).file).toBeNull();
+    expect(reencodeParams.parse({ library: 'TV Shows', folder: 'Shogun', limit: 1 }).limit).toBe(1);
+    expect(reencodeParams.safeParse({ library: 'TV Shows', folder: 'Shogun', limit: 0 }).success).toBe(false);
   });
 
   it('refuses anything outside a library folder', () => {

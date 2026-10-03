@@ -3,6 +3,7 @@ import {
   appendLog,
   bytesPerHour,
   heldOriginals,
+  matchesQuery,
   heldParams,
   reencodeParams,
   encodeParams,
@@ -186,5 +187,20 @@ describe('bytesPerHour', () => {
     expect(bytesPerHour(30 * 1024 ** 3, 7200)).toBe(15 * 1024 ** 3);
     expect(bytesPerHour(null, 7200)).toBeNull();
     expect(bytesPerHour(1, null)).toBeNull();
+  });
+});
+
+describe('matchesQuery', () => {
+  it('matches every word in any order, ignoring case and accents', () => {
+    expect(matchesQuery('Heat 1995 Movies/Heat (1995) {tmdb-949}/Heat (1995).mkv', 'heat 1995')).toBe(true);
+    expect(matchesQuery('Güneşin Doğduğu Yer', 'gunesin yer')).toBe(true);
+    expect(matchesQuery('Kurtlar Vadisi Pusu', 'KURTLAR')).toBe(true);
+    expect(matchesQuery('Diriliş Ertuğrul', 'dirilis')).toBe(true);
+    expect(matchesQuery('Heat', 'heat 1996')).toBe(false);
+  });
+
+  it('matches everything for an empty query', () => {
+    expect(matchesQuery('anything', '')).toBe(true);
+    expect(matchesQuery('anything', '   ')).toBe(true);
   });
 });

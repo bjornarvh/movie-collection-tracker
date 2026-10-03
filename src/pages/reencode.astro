@@ -7,13 +7,14 @@ import { copies, files, movies } from '../db/schema';
 import Layout from '../layouts/Layout.astro';
 import { back, str } from '../lib/forms';
 import { formatBytes, resolutionLabel } from '../lib/formats';
-import { bytesPerHour, workerOnline } from '../lib/task-queue';
+import { bytesPerHour, matchesQuery, workerOnline } from '../lib/task-queue';
 import { enqueue, getWorker, listHeldOriginals, openReencodeTasks } from '../lib/tasks';
 
 const url = Astro.url;
 const tab = url.searchParams.get('tab') === 'tv' ? 'tv' : 'movies';
 const showAll = url.searchParams.get('all') === '1';
-const keep = ['tab', 'all'];
+const q = (url.searchParams.get('q') ?? '').trim().slice(0, 100);
+const keep = ['tab', 'all', 'q'];
 
 function options(form: FormData) {
   const maxHeight = str(form, 'max_height');
@@ -116,11 +117,19 @@ const heldPaths = new Set(held.map((h) => h.relPath));
 const rows = movieFiles()
   .map((f) => ({ ...f, bph: bytesPerHour(f.sizeBytes, f.durationS ?? (f.runtime ? f.runtime * 60 : null)) }))
   .filter((f) => showAll || f.codec?.toLowerCase() !== 'hevc')
+  .filter((f) => matchesQuery(`${f.title} ${f.year ?? ''} ${f.relPath}`, q))
   .sort((a, b) => (b.bph ?? -1) - (a.bph ?? -1) || a.title.localeCompare(b.title));
-const tvFolders = server?.libraries['TV Shows'] ?? [];
+// Match on the show name, so a matching show keeps all its seasons.
+const tvFolders = (server?.libraries['TV Shows'] ?? []).filter((folder) => matchesQuery(folder.split('/')[0], q));
 const gbh = (bph: number | null) => (bph ? `${(bph / 1024 ** 3).toFixed(1)} GB/h` : '');
 const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '');
-const tabLink = (t: string) => `/reencode?tab=${t}${showAll ? '&all=1' : ''}`;
+const link = (params: { tab?: string; all?: boolean; q?: string }) => {
+  const next = new URLSearchParams();
+  next.set('tab', params.tab ?? tab);
+  if (params.all ?? showAll) next.set('all', '1');
+  if ((params.q ?? q) !== '') next.set('q', params.q ?? q);
+  return `/reencode?${next}`;
+};
 ---
 
 <Layout title="Re-encode">
@@ -141,11 +150,18 @@ const tabLink = (t: string) => `/reencode?tab=${t}${showAll ? '&all=1' : ''}`;
   }
 
   <div class="mb-4 flex flex-wrap items-center gap-2">
-    <a href={tabLink('movies')} class:list={['btn btn-sm', tab === 'movies' && 'btn-primary']}>Movies</a>
-    <a href={tabLink('tv')} class:list={['btn btn-sm', tab === 'tv' && 'btn-primary']}>TV Shows</a>
+    <a href={link({ tab: 'movies' })} class:list={['btn btn-sm', tab === 'movies' && 'btn-primary']}>Movies</a>
+    <a href={link({ tab: 'tv' })} class:list={['btn btn-sm', tab === 'tv' && 'btn-primary']}>TV Shows</a>
+    <form method="get" class="flex items-center gap-2">
+      <input type="hidden" name="tab" value={tab} />
+      {showAll && <input type="hidden" name="all" value="1" />}
+      <input type="search" name="q" value={q} placeholder={tab === 'tv' ? 'Search shows' : 'Search movies'} class="w-56 py-1" aria-label="Search" />
+      <button class="btn btn-sm">Search</button>
+      {q && <a href={link({ q: '' })} class="text-xs text-ink-400 hover:underline">clear</a>}
+    </form>
     {
       tab === 'movies' && (
-        <a href={`/reencode?tab=movies${showAll ? '' : '&all=1'}`} class="btn btn-sm ml-auto">
+        <a href={link({ all: !showAll })} class="btn btn-sm ml-auto">
           {showAll ? 'Hide HEVC files' : 'Show HEVC files too'}
         </a>
       )
@@ -182,7 +198,9 @@ const tabLink = (t: string) => `/reencode?tab=${t}${showAll ? '&all=1' : ''}`;
     {
       tab === 'movies' ? (
         rows.length === 0 ? (
-          <p class="p-4 text-sm text-ink-500">{showAll ? 'No movie files.' : 'Every movie file is HEVC already.'}</p>
+          <p class="p-4 text-sm text-ink-500">
+            {q ? `No movie matches "${q}".` : showAll ? 'No movie files.' : 'Every movie file is HEVC already.'}
+          </p>
         ) : (
           <table class="table">
             <thead>
@@ -234,7 +252,7 @@ const tabLink = (t: string) => `/reencode?tab=${t}${showAll ? '&all=1' : ''}`;
           </table>
         )
       ) : tvFolders.length === 0 ? (
-        <p class="p-4 text-sm text-ink-500">The server worker hasn't reported any TV Shows folders yet.</p>
+        <p class="p-4 text-sm text-ink-500">{q ? `No show matches "${q}".` : "The server worker hasn't reported any TV Shows folders yet."}</p>
       ) : (
         <ul class="divide-y divide-ink-850 text-sm">
           {tvFolders.map((folder) => {

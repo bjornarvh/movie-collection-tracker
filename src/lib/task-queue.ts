@@ -152,6 +152,23 @@ export function heldOriginals(rows: ResultRow[]): HeldOriginal[] {
   return [...held.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
 }
 
+/** Lowercase without accents, so "gunesin" finds "Güneşin" and "ı" counts as "i". */
+const searchKey = (s: string) =>
+  s
+    .toLocaleLowerCase('en')
+    .replace(/ı/g, 'i')
+    .normalize('NFD')
+    .replace(/\p{M}/gu, '');
+
+/** True when every word of the query appears in the text (any order); an empty query matches all. */
+export function matchesQuery(text: string, query: string) {
+  const haystack = searchKey(text);
+  return searchKey(query)
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((word) => haystack.includes(word));
+}
+
 /** Bytes per hour of runtime, for ranking remuxes; null without both numbers. */
 export function bytesPerHour(sizeBytes: number | null, durationS: number | null) {
   return sizeBytes && durationS ? sizeBytes / (durationS / 3600) : null;

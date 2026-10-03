@@ -1,0 +1,242 @@
+---
+import { ZodError } from 'zod';
+import Layout from '../layouts/Layout.astro';
+import { back, str } from '../lib/forms';
+import { runAllSteps, taskState, workerOnline } from '../lib/task-queue';
+import { enqueue, enqueueChain, getWorker, latestScan, openSubtitleTasks, queueScan } from '../lib/tasks';
+
+type Episode = { name: string; rel: string; source: boolean; no: boolean; proofread: boolean; changed?: number; cues?: number };
+type Series = {
+  folder: string;
+  slug: string;
+  notes: boolean;
+  names: boolean;
+  episodes: Episode[];
+  counts: { episodes: number; source: number; no: number; proofread: number };
+};
+type Scan = { scannedAt: string; notesSlugs: string[]; series: Series[] };
+
+const url = Astro.url;
+const scanTask = latestScan();
+const scan = (scanTask?.result ?? null) as Scan | null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const action = str(form, '_action');
+  if (action === 'scan') {
+    queueScan();
+    return back(url, { ok: 'Scanning D:\\Video. Reload in a moment.' });
+  }
+  const seriesName = str(form, 'series');
+  const s = scan?.series.find((x) => x.folder === seriesName);
+  if (!s) return back(url, { err: 'Unknown series; refresh the status first.' });
+  // The slug may be overridden from the list of existing notes, or the guess.
+  const slug = str(form, 'slug') || s.slug;
+  const hasNotes = (scan?.notesSlugs ?? []).includes(slug);
+  const count = Number(str(form, 'count')) || 5;
+  const pilot = s.counts.proofread === 0;
+  try {
+    switch (action) {
+      case 'transcribe':
+      case 'translate':
+        enqueue(action, 'desktop', { series: s.folder });
+        break;
+      case 'fix-tr':
+      case 'fix-no':
+        enqueue('fix-names', 'desktop', {
+          series: s.folder,
+          slug,
+          lang: action === 'fix-tr' ? 'tr' : 'no',
+          unproofread: action === 'fix-no' && s.counts.proofread > 0,
+          dryRun: form.get('dry_run') === 'on',
+        });
+        break;
+      case 'prepare':
+        enqueue('prepare-series', 'desktop', { series: s.folder, slug });
+        break;
+      case 'proofread':
+        if (!hasNotes) return back(url, { err: `Proofreading needs notes/${slug}.txt: run Prepare notes first.` });
+        enqueue('proofread', 'desktop', { series: s.folder, slug, count: pilot ? 1 : count });
+        break;
+      case 'run-all': {
+        const steps = runAllSteps({ ...s, notes: hasNotes, names: hasNotes && s.names }, slug, count).map((step) => ({
+          type: step.type,
+          params: { series: s.folder, ...step.params },
+        }));
+        enqueueChain('desktop', steps);
+        return back(url, { ok: `Queued ${steps.length} steps for ${s.folder}: ${steps.map((x) => x.type).join(' → ')}.` });
+      }
+      default:
+        return back(url, { err: 'Unknown action.' });
+    }
+  } catch (e) {
+    if (e instanceof ZodError) return back(url, { err: e.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    throw e;
+  }
+  return back(url, { ok: `Queued on the desktop: ${action.replace('-', ' ')} for ${s.folder}.` });
+}
+
+const desktop = getWorker('desktop');
+const now = new Date();
+const canRun = desktop?.capabilities.includes('subtitle-scan') ?? false;
+const open = openSubtitleTasks();
+const openFor = (folder: string) => open.filter((t) => (t.params as { series?: string }).series === folder);
+// A series whose videos have all moved to the server (only subtitles left) has nothing to run.
+const active = (s: Series) => s.counts.episodes > 0 && (s.counts.source > 0 || s.notes);
+const started = (scan?.series ?? []).filter(active);
+const others = (scan?.series ?? []).filter((s) => !active(s));
+const pct = (n: number, total: number) => (total ? `${Math.round((n / total) * 100)}%` : '0%');
+const fmt = (iso: string) => new Date(iso).toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' });
+---
+
+<Layout title="Subtitles">
+  <div class="mb-2 flex flex-wrap items-center gap-3">
+    <h1 class="text-2xl font-semibold tracking-tight">Subtitles</h1>
+    <form method="post" class="ml-auto flex items-center gap-2">
+      <input type="hidden" name="_action" value="scan" />
+      {scan && <span class="text-xs text-ink-500">status from {fmt(scan.scannedAt)}</span>}
+      <button class="btn btn-sm">Refresh status</button>
+    </form>
+  </div>
+  <p class="mb-4 max-w-3xl text-sm text-ink-400">
+    subgen-cli on the desktop: Whisper transcribes, NLLB translates (both on the GPU), fix_names applies the series' name rules, and Claude
+    writes series notes and proofreads in batches on your Max plan. A new series' first proofread is a single pilot episode, so you can read
+    its diff before more. Status refreshes after every step.
+  </p>
+  {
+    !canRun && (
+      <p class="mb-4 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-2.5 text-sm text-amber-200">
+        The desktop worker hasn't reported subtitle support yet{desktop && !workerOnline(desktop, now) ? ' (it is offline)' : ''}.
+      </p>
+    )
+  }
+  {!scan && <p class="card p-5 text-sm text-ink-400">No status yet. Press Refresh status (the desktop worker scans D:\Video).</p>}
+
+  <div class="space-y-4">
+    {
+      started.map((s) => {
+        const c = s.counts;
+        const busy = openFor(s.folder);
+        const pilot = c.proofread === 0;
+        const slugs = [...new Set([s.slug, ...(scan?.notesSlugs ?? [])])];
+        return (
+          <section class="card p-4">
+            <div class="mb-2 flex flex-wrap items-baseline justify-between gap-2">
+              <h2 class="text-lg font-semibold">{s.folder}</h2>
+              <span class="text-sm text-ink-400 tabular-nums">
+                {c.episodes} videos · {c.source} transcribed · {c.no} translated · {c.proofread} proofread
+              </span>
+            </div>
+            <div class="mb-3 flex h-2 overflow-hidden rounded bg-ink-800" title="proofread / translated / transcribed">
+              <div class="bg-emerald-500" style={`width:${pct(c.proofread, c.episodes)}`} />
+              <div class="bg-sky-600" style={`width:${pct(c.no - c.proofread, c.episodes)}`} />
+              <div class="bg-ink-500" style={`width:${pct(c.source - c.no, c.episodes)}`} />
+            </div>
+
+            <form method="post" class="flex flex-wrap items-center gap-2">
+              <input type="hidden" name="series" value={s.folder} />
+              <label class="flex items-center gap-1 text-xs">
+                notes
+                <select name="slug" class="py-1 text-xs">
+                  {slugs.map((slug) => (
+                    <option value={slug} selected={slug === s.slug}>
+                      {slug}
+                      {(scan?.notesSlugs ?? []).includes(slug) ? '' : ' (new)'}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <span class:list={['text-xs', s.notes ? 'text-emerald-300' : 'text-amber-300']}>
+                {s.notes ? (s.names ? 'notes + names' : 'notes, no names') : 'no notes yet'}
+              </span>
+              <span class="mx-1 h-4 w-px bg-ink-700" />
+              <button class="btn btn-sm" name="_action" value="transcribe" disabled={c.source >= c.episodes} title="Whisper, GPU">
+                Transcribe
+              </button>
+              <button class="btn btn-sm" name="_action" value="translate" disabled={c.source === 0 || c.no >= c.source} title="NLLB, GPU">
+                Translate
+              </button>
+              <button class="btn btn-sm" name="_action" value="fix-tr" disabled={!s.names}>Fix names TR</button>
+              <button class="btn btn-sm" name="_action" value="fix-no" disabled={!s.names || c.no === 0}>Fix names NO</button>
+              <label class="flex items-center gap-1 text-xs"><input type="checkbox" name="dry_run" /> dry run</label>
+              <button class="btn btn-sm" name="_action" value="prepare" disabled={c.source === 0} title="Claude researches the series and writes notes/names">
+                {s.notes ? 'Update notes' : 'Prepare notes'}
+              </button>
+              <span class="mx-1 h-4 w-px bg-ink-700" />
+              {!pilot && <input name="count" type="number" min="1" max="10" value="5" class="w-14 py-1 text-xs" aria-label="Batch size" />}
+              <button class="btn btn-sm" name="_action" value="proofread" disabled={!s.notes || c.no <= c.proofread}>
+                {pilot ? 'Proofread pilot (1 episode)' : 'Proofread next'}
+              </button>
+              <button class="btn btn-sm btn-primary" name="_action" value="run-all" disabled={c.episodes === 0} title="Every step that applies, chained">
+                Run all
+              </button>
+            </form>
+
+            {
+              busy.length > 0 && (
+                <ul class="mt-2 text-xs">
+                  {busy.map((t) => (
+                    <li>
+                      <a href={`/tasks/${t.id}`} class="text-amber-300 hover:underline">
+                        {taskState(t, now)}: {t.title}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              )
+            }
+
+            <details class="mt-2">
+              <summary class="cursor-pointer text-xs text-ink-400">Episodes</summary>
+              <table class="table mt-1">
+                <tbody>
+                  {s.episodes.map((e) => (
+                    <tr>
+                      <td class="max-w-md truncate text-xs" title={e.rel}>
+                        {e.name}
+                      </td>
+                      <td class="text-xs">
+                        {e.proofread ? (
+                          <span class="text-emerald-300">proofread{e.cues ? ` · ${e.changed} of ${e.cues} cues changed` : ''}</span>
+                        ) : e.no ? (
+                          <span class="text-sky-300">translated</span>
+                        ) : e.source ? (
+                          <span class="text-ink-300">transcribed</span>
+                        ) : (
+                          <span class="text-ink-500">no subtitles</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </details>
+          </section>
+        );
+      })
+    }
+  </div>
+
+  {
+    others.length > 0 && (
+      <details class="card mt-6 p-4">
+        <summary class="cursor-pointer text-sm text-ink-300">Other folders in D:\Video ({others.length})</summary>
+        <ul class="mt-2 divide-y divide-ink-850 text-sm">
+          {others.map((s) => (
+            <li class="flex items-center justify-between gap-2 py-1.5">
+              <span>
+                {s.folder} <span class="text-xs text-ink-500">{s.counts.episodes} videos</span>
+              </span>
+              <form method="post">
+                <input type="hidden" name="series" value={s.folder} />
+                <button class="btn btn-sm" name="_action" value="transcribe" disabled={s.counts.episodes === 0}>
+                  Transcribe
+                </button>
+              </form>
+            </li>
+          ))}
+        </ul>
+      </details>
+    )
+  }
+</Layout>

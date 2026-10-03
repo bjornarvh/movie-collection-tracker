@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   appendLog,
   bytesPerHour,
+  chainState,
+  runAllSteps,
+  subtitleParams,
   heldOriginals,
   matchesQuery,
   heldParams,
@@ -232,5 +235,43 @@ describe('ytdlp params', () => {
       { url, folder: 'Show', subLangs: 'en --exec x' },
     ];
     for (const p of bad) expect(ytdlpParams.safeParse(p).success, JSON.stringify(p)).toBe(false);
+  });
+});
+
+describe('subtitle tasks', () => {
+  it('validates series, slug and options', () => {
+    expect(subtitleParams.proofread.parse({ series: 'Savaşçı {tmdb-76500}', slug: 'savasci' }).count).toBe(5);
+    expect(subtitleParams['fix-names'].safeParse({ series: 'Ramo', slug: 'ramo', lang: 'de' }).success).toBe(false);
+    expect(subtitleParams.proofread.safeParse({ series: '../x', slug: 'savasci' }).success).toBe(false);
+    expect(subtitleParams.proofread.safeParse({ series: 'Ramo', slug: '../../etc' }).success).toBe(false);
+    expect(subtitleParams.proofread.safeParse({ series: 'Ramo', slug: 'ramo', count: 20 }).success).toBe(false);
+  });
+
+  it('titles them', () => {
+    expect(taskTitle('fix-names', { series: 'Ramo', lang: 'no', dryRun: true })).toBe('Fix names (no, dry run): Ramo');
+    expect(taskTitle('proofread', { series: 'Ramo', count: 1 })).toBe('Proofread next 1: Ramo');
+  });
+});
+
+describe('chains', () => {
+  it('waits for the step before and cancels after a failure', () => {
+    expect(chainState(null)).toBe('ready');
+    expect(chainState('done')).toBe('ready');
+    expect(chainState('queued')).toBe('waiting');
+    expect(chainState('running')).toBe('waiting');
+    expect(chainState('failed')).toBe('cancel');
+    expect(chainState('cancelled')).toBe('cancel');
+  });
+
+  it('run all includes only the steps that apply', () => {
+    const fresh = { counts: { episodes: 10, proofread: 0 }, notes: false, names: false };
+    expect(runAllSteps(fresh, 'x', 5).map((s) => s.type)).toEqual(['transcribe', 'translate']);
+    const ready = { counts: { episodes: 10, proofread: 0 }, notes: true, names: true };
+    const steps = runAllSteps(ready, 'x', 5);
+    expect(steps.map((s) => s.type)).toEqual(['transcribe', 'fix-names', 'translate', 'fix-names', 'proofread']);
+    expect(steps.at(-1)!.params).toEqual({ slug: 'x', count: 1 }); // pilot on a new series
+    const going = runAllSteps({ counts: { episodes: 10, proofread: 3 }, notes: true, names: true }, 'x', 5);
+    expect(going[3].params).toEqual({ slug: 'x', lang: 'no', unproofread: true });
+    expect(going.at(-1)!.params).toEqual({ slug: 'x', count: 5 });
   });
 });

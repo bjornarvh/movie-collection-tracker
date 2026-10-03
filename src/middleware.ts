@@ -4,7 +4,7 @@ import { ensureInit } from './lib/init';
 
 const PUBLIC_PATHS = ['/login', '/healthz', '/favicon.svg', '/favicon.ico'];
 /** Pages only the admin may see; guests get read-only access to everything else. */
-const ADMIN_PATHS = ['/add', '/review', '/settings', '/upgrades', '/encodes', '/to-rip', '/tasks', '/reencode', '/download'];
+const ADMIN_PATHS = ['/add', '/review', '/settings', '/upgrades', '/encodes', '/to-rip', '/tasks', '/reencode', '/download', '/subtitles'];
 
 const json = (status: number, body: unknown) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });

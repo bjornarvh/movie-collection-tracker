@@ -29,6 +29,13 @@
       "when": 1791019594631,
       "tag": "0003_reencode",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1791022088509,
+      "tag": "0004_task_progress",
+      "breakpoints": true
     }
   ]
 }

@@ -231,7 +231,8 @@ export const workers = sqliteTable('workers', {
   lastSeenAt: timestamp('last_seen_at'),
 });
 
-export const TASK_TYPES = ['encode', 'handoff', 'reencode', 'purge-original', 'restore-original', 'ytdlp'] as const;
+export const TASK_TYPES = ['encode', 'handoff', 'reencode', 'purge-original', 'restore-original', 'ytdlp',
+  'subtitle-scan', 'transcribe', 'translate', 'fix-names', 'prepare-series', 'proofread'] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_STATUSES = ['queued', 'running', 'done', 'failed', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -255,6 +256,8 @@ export const tasks = sqliteTable(
     lastSeenAt: timestamp('last_seen_at'),
     exitCode: integer('exit_code'),
     log: text('log').notNull().default(''),
+    /** The line the child keeps redrawing (ffmpeg/yt-dlp progress); cleared when the task ends. */
+    progress: text('progress'),
     error: text('error'),
     /** What the worker reported back, e.g. reencode.py's per-file summary. */
     result: text('result', { mode: 'json' }).$type<Record<string, unknown>>(),

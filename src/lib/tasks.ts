@@ -1,9 +1,11 @@
-import { and, asc, desc, eq, inArray } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, lt, ne } from 'drizzle-orm';
 import { db } from '../db/client';
 import { files, tasks, workers, type Task, type TaskType, type Worker } from '../db/schema';
 import {
   appendLog,
+  chainState,
   heldOriginals,
+  SUBTITLE_TYPES,
   mayClaim,
   PARAMS,
   taskTitle,
@@ -40,25 +42,32 @@ export function claimNext(name: string, req: ClaimRequest, now = new Date()): Ta
       .returning()
       .get();
 
-    tx.update(tasks)
+    const orphans = tx
+      .update(tasks)
       .set({ status: 'failed', error: 'the worker restarted before finishing', finishedAt: now })
       .where(and(eq(tasks.worker, name), eq(tasks.status, 'running')))
-      .run();
+      .returning({ id: tasks.id })
+      .all();
+    for (const orphan of orphans) cancelChildren(orphan.id, now);
 
     if (!mayClaim(worker, now) || !req.capabilities.length) return null;
-    const next = tx
+    const candidates = tx
       .select()
       .from(tasks)
-      .where(
-        and(
-          eq(tasks.worker, name),
-          eq(tasks.status, 'queued'),
-          inArray(tasks.type, req.capabilities as TaskType[]),
-        ),
-      )
+      .where(and(eq(tasks.worker, name), eq(tasks.status, 'queued'), inArray(tasks.type, req.capabilities as TaskType[])))
       .orderBy(asc(tasks.id))
-      .limit(1)
-      .get();
+      .all();
+    // A chained step waits for the one before it, and goes when that failed.
+    let next: Task | undefined;
+    for (const candidate of candidates) {
+      const parent = candidate.parentId ? tx.select().from(tasks).where(eq(tasks.id, candidate.parentId)).get() : undefined;
+      const state = chainState(candidate.parentId ? (parent?.status ?? 'cancelled') : null);
+      if (state === 'ready') {
+        next = candidate;
+        break;
+      }
+      if (state === 'cancel') cancelChain(candidate.id, now, 'an earlier step did not finish');
+    }
     if (!next) return null;
     return tx
       .update(tasks)
@@ -81,12 +90,14 @@ export function updateTask(id: number, u: TaskUpdate, now = new Date()) {
 
   const set: Partial<typeof tasks.$inferInsert> = { lastSeenAt: now };
   if (u.log) set.log = appendLog(task.log, u.log);
+  if (u.progress !== undefined) set.progress = u.progress || null;
   if (u.exitCode !== undefined) set.exitCode = u.exitCode;
   if (u.error !== undefined) set.error = u.error;
   if (u.result !== undefined) set.result = u.result;
   if (u.status === 'done' || u.status === 'failed') {
     set.status = u.status === 'failed' && task.cancelRequested ? 'cancelled' : u.status;
     set.finishedAt = now;
+    set.progress = null;
   }
   const updated = db.update(tasks).set(set).where(eq(tasks.id, id)).returning().get();
   // A busy worker reports to its task instead of polling; it is still online.
@@ -94,6 +105,9 @@ export function updateTask(id: number, u: TaskUpdate, now = new Date()) {
 
   if (updated.type === 'reencode' && u.result) applyReencode(u.result);
   if (updated.type === 'restore-original' && updated.status === 'done') applyRestore(updated.params.relPath as string, updated.id);
+
+  if (updated.status === 'failed' || updated.status === 'cancelled') cancelChildren(updated.id, now);
+  if (updated.finishedAt && (SUBTITLE_TYPES as readonly string[]).includes(updated.type)) afterSubtitleTask(updated);
 
   if (updated.status === 'done' && updated.type === 'handoff') {
     const then = (updated.params as { then?: Record<string, unknown> | null }).then;
@@ -153,12 +167,91 @@ export function openReencodeTasks(): Task[] {
     .all();
 }
 
+/** Cancel a queued task and everything chained after it. */
+function cancelChain(id: number, now: Date, reason: string) {
+  db.update(tasks)
+    .set({ status: 'cancelled', finishedAt: now, error: reason })
+    .where(and(eq(tasks.id, id), eq(tasks.status, 'queued')))
+    .run();
+  cancelChildren(id, now);
+}
+
+function cancelChildren(parentId: number, now: Date) {
+  for (const child of db.select().from(tasks).where(and(eq(tasks.parentId, parentId), eq(tasks.status, 'queued'))).all()) {
+    cancelChain(child.id, now, 'an earlier step did not finish');
+  }
+}
+
+/**
+ * Subtitle status comes from a scan of D:\Video, run when asked: after every
+ * subtitle step (unless a scan is already waiting), and when a scan lands, the
+ * older scans' results are dropped so the table doesn't grow with copies.
+ */
+function afterSubtitleTask(task: Task) {
+  if (task.type !== 'subtitle-scan') {
+    queueScan();
+    return;
+  }
+  if (task.status === 'done' && task.result) {
+    db.update(tasks)
+      .set({ result: null })
+      .where(and(eq(tasks.type, 'subtitle-scan'), lt(tasks.id, task.id), isNotNull(tasks.result)))
+      .run();
+  }
+}
+
+/** Queue a subtitle scan on the desktop unless one is already waiting. */
+export function queueScan() {
+  const waiting = db
+    .select({ id: tasks.id })
+    .from(tasks)
+    .where(and(eq(tasks.type, 'subtitle-scan'), eq(tasks.status, 'queued')))
+    .get();
+  return waiting ?? enqueue('subtitle-scan', 'desktop', {});
+}
+
+/** The newest finished subtitle scan, or null before the first one. */
+export function latestScan() {
+  return (
+    db
+      .select()
+      .from(tasks)
+      .where(and(eq(tasks.type, 'subtitle-scan'), eq(tasks.status, 'done'), isNotNull(tasks.result)))
+      .orderBy(desc(tasks.id))
+      .limit(1)
+      .get() ?? null
+  );
+}
+
+/** Subtitle tasks not finished yet, for marking series as busy. */
+export function openSubtitleTasks(): Task[] {
+  return db
+    .select()
+    .from(tasks)
+    .where(and(inArray(tasks.type, [...SUBTITLE_TYPES]), inArray(tasks.status, ['queued', 'running']), ne(tasks.type, 'subtitle-scan')))
+    .all();
+}
+
+/** Queue steps as a chain: each waits for the previous one to finish cleanly. */
+export function enqueueChain(worker: string, steps: { type: TaskType; params: Record<string, unknown> }[]) {
+  let parent: number | null = null;
+  const queued: Task[] = [];
+  for (const step of steps) {
+    const task = enqueue(step.type, worker, step.params, parent);
+    queued.push(task);
+    parent = task.id;
+  }
+  return queued;
+}
+
 /** A queued task is dropped at once; a running one is told to stop on its next report. */
 export function cancelTask(id: number, now = new Date()) {
   const task = db.select().from(tasks).where(eq(tasks.id, id)).get();
   if (!task) return null;
   if (task.status === 'queued') {
-    return db.update(tasks).set({ status: 'cancelled', finishedAt: now }).where(eq(tasks.id, id)).returning().get();
+    const cancelled = db.update(tasks).set({ status: 'cancelled', finishedAt: now }).where(eq(tasks.id, id)).returning().get();
+    cancelChildren(id, now);
+    return cancelled;
   }
   if (task.status === 'running') {
     return db.update(tasks).set({ cancelRequested: true }).where(eq(tasks.id, id)).returning().get();

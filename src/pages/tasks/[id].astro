@@ -93,6 +93,11 @@ const rows: [string, string][] = [
       {task.error && <p class="mb-3 rounded-md bg-red-950/60 px-3 py-2 text-sm text-red-200">{task.error}</p>}
       <h2 class="mb-2 text-lg font-semibold">Output</h2>
       {
+        task.status === 'running' && task.progress && (
+          <p class="mb-2 rounded-md bg-ink-850 px-3 py-2 font-mono text-xs text-amber-200">{task.progress}</p>
+        )
+      }
+      {
         task.log ? (
           <pre id="log" class="max-h-[70vh] overflow-auto rounded-lg bg-ink-950 p-3 text-xs whitespace-pre-wrap text-ink-300">{task.log}</pre>
         ) : (

@@ -116,6 +116,30 @@ export const ytdlpParams = z.object({
   mode: z.enum(['download', 'list']).default('download'),
 });
 
+// ---- subtitles (subgen-cli, on the desktop) ---------------------------------
+
+/** notes/<slug>.txt / .names in subgen-cli. */
+export const notesSlug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,80}$/, 'not a notes slug');
+
+const series = z.object({ series: folderName });
+
+export const SUBTITLE_TYPES = ['subtitle-scan', 'transcribe', 'translate', 'fix-names', 'prepare-series', 'proofread'] as const;
+
+export const subtitleParams = {
+  'subtitle-scan': z.object({}),
+  transcribe: series,
+  translate: series,
+  'fix-names': series.extend({
+    slug: notesSlug,
+    lang: z.enum(['tr', 'no']),
+    /** Skip proofread episodes, so a no: rule never undoes a proofreader's fix. */
+    unproofread: z.boolean().default(false),
+    dryRun: z.boolean().default(false),
+  }),
+  'prepare-series': series.extend({ slug: notesSlug }),
+  proofread: series.extend({ slug: notesSlug, count: z.number().int().min(1).max(10).default(5) }),
+};
+
 export type EncodeParams = z.infer<typeof encodeParams>;
 export type HandoffParams = z.infer<typeof handoffParams>;
 export type ReencodeParams = z.infer<typeof reencodeParams>;
@@ -127,6 +151,7 @@ export const PARAMS: Record<TaskType, z.ZodType> = {
   'purge-original': heldParams,
   'restore-original': heldParams,
   ytdlp: ytdlpParams,
+  ...subtitleParams,
 };
 
 // ---- re-encode results -----------------------------------------------------
@@ -201,6 +226,26 @@ export function matchesQuery(text: string, query: string) {
     .every((word) => haystack.includes(word));
 }
 
+/**
+ * A chained task may start only once the task before it finished cleanly; a
+ * failed or cancelled step cancels everything after it.
+ */
+export function chainState(parentStatus: Task['status'] | null): 'ready' | 'waiting' | 'cancel' {
+  if (parentStatus === null || parentStatus === 'done') return 'ready';
+  if (parentStatus === 'failed' || parentStatus === 'cancelled') return 'cancel';
+  return 'waiting';
+}
+
+/** One subtitle step in a "Run all" chain, from what the latest scan says exists. */
+export function runAllSteps(s: { counts: { episodes: number; proofread: number }; notes: boolean; names: boolean }, slug: string, count: number) {
+  const steps: { type: (typeof SUBTITLE_TYPES)[number]; params: Record<string, unknown> }[] = [{ type: 'transcribe', params: {} }];
+  if (s.names) steps.push({ type: 'fix-names', params: { slug, lang: 'tr' } });
+  steps.push({ type: 'translate', params: {} });
+  if (s.names) steps.push({ type: 'fix-names', params: { slug, lang: 'no', unproofread: s.counts.proofread > 0 } });
+  if (s.notes) steps.push({ type: 'proofread', params: { slug, count: s.counts.proofread === 0 ? 1 : count } });
+  return steps;
+}
+
 /** Bytes per hour of runtime, for ranking remuxes; null without both numbers. */
 export function bytesPerHour(sizeBytes: number | null, durationS: number | null) {
   return sizeBytes && durationS ? sizeBytes / (durationS / 3600) : null;
@@ -211,7 +256,17 @@ export const WORKER_ENCODERS: Record<string, string> = { desktop: 'NVENC (GPU)',
 
 export function taskTitle(
   type: TaskType,
-  params: { folder?: string; mode?: string; file?: string | null; relPath?: string; then?: { mode?: string } | null },
+  params: {
+    folder?: string;
+    mode?: string;
+    file?: string | null;
+    relPath?: string;
+    series?: string;
+    lang?: string;
+    dryRun?: boolean;
+    count?: number;
+    then?: { mode?: string } | null;
+  },
 ) {
   const mode = params.mode && params.mode !== 'full' ? ` (${params.mode})` : '';
   const leaf = (p?: string) => p?.split('/').at(-1) ?? '';
@@ -224,6 +279,18 @@ export function taskTitle(
       return `Delete held original: ${leaf(params.relPath)}`;
     case 'restore-original':
       return `Restore original: ${leaf(params.relPath)}`;
+    case 'subtitle-scan':
+      return 'Scan subtitle status';
+    case 'transcribe':
+      return `Transcribe: ${params.series}`;
+    case 'translate':
+      return `Translate: ${params.series}`;
+    case 'fix-names':
+      return `Fix names (${params.lang}${params.dryRun ? ', dry run' : ''}): ${params.series}`;
+    case 'prepare-series':
+      return `Prepare notes: ${params.series}`;
+    case 'proofread':
+      return `Proofread next ${params.count ?? 5}: ${params.series}`;
     case 'ytdlp':
       return `Download${params.mode === 'list' ? ' (list only)' : ''}: ${params.folder}`;
     default:
@@ -243,6 +310,8 @@ export const taskUpdateSchema = z.object({
   status: z.enum(['running', 'done', 'failed']).optional(),
   /** Output since the last report, appended to the stored log. */
   log: z.string().max(1_000_000).optional(),
+  /** The child's current progress line, which never reaches the log until it ends. */
+  progress: z.string().max(500).optional(),
   exitCode: z.number().int().optional(),
   error: z.string().max(2000).optional(),
   result: z.record(z.string(), z.unknown()).optional(),

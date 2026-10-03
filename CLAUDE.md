@@ -44,10 +44,11 @@ CI runs `pnpm test` and `pnpm run check` on every push and PR. A push to `main` 
   - The Movies tab lists `Movies/<folder>/<file>.mkv` rows from `files`. Non-HEVC files show by default, ranked by GB/hour (`files.duration_s` from Plex's `Media.duration`, falling back to TMDB runtime). The TV Shows tab lists the show and season folders the server reports (`workers.libraries`).
   - **The file keeps its path,** so its row and copy link stay, and re-encodes never call ingest (it would force a pirated copy to owned). When a result arrives, `applyReencode` sets codec and size on the row at once; `applyRestore` puts the original size back and clears codec for the next scan.
   - **Originals wait in `_replaced` until the owner deletes or restores them.** The "held" list is derived from finished task results (`heldOriginals` replays replace, restore and purge in task order), not stored, so it can't drift from what the worker did.
+- **`/download` queues yt-dlp on the desktop** (task type `ytdlp`) into `D:\Video\<folder>`. You choose max resolution, subtitle languages (default `en`), embedding, auto-captions, skipping already-downloaded videos, and "list only" (`--simulate`). The worker builds the command (`worker_tasks.plan_ytdlp`); the folder suggestions come from the desktop's `libraries.Video`.
 - **`src/middleware.ts`** handles all auth.
   - API routes accept `Bearer` tokens.
   - Pages use the session cookie.
-  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks`, `/reencode` or `/api`.
+  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks`, `/reencode`, `/download` or `/api`.
   - Cookie-authenticated writes need a same-origin `Origin`/`Referer`. Astro's own `checkOrigin` is off because it fails behind Caddy's TLS.
 - **Config is read from `process.env` at runtime** (`src/lib/config.ts`). Never read it from `import.meta.env`, which is inlined at build time.
 - **Data model:**

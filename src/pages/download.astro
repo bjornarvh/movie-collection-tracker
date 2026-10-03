@@ -1,0 +1,138 @@
+---
+import { desc, eq } from 'drizzle-orm';
+import { ZodError } from 'zod';
+import { db } from '../db/client';
+import { tasks } from '../db/schema';
+import Layout from '../layouts/Layout.astro';
+import { back, str } from '../lib/forms';
+import { taskState, workerOnline, YTDLP_HEIGHTS } from '../lib/task-queue';
+import { enqueue, getWorker } from '../lib/tasks';
+
+const url = Astro.url;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  const height = str(form, 'max_height');
+  const params = {
+    url: str(form, 'url'),
+    folder: str(form, 'folder'),
+    maxHeight: height === '' ? null : Number(height),
+    subLangs: str(form, 'sub_langs'),
+    embedSubs: form.get('embed_subs') === 'on',
+    autoSubs: form.get('auto_subs') === 'on',
+    skipDownloaded: form.get('skip_downloaded') === 'on',
+    mode: str(form, '_action') === 'list' ? 'list' : 'download',
+  };
+  try {
+    const task = enqueue('ytdlp', 'desktop', params);
+    return Astro.redirect(`/tasks/${task.id}`, 303);
+  } catch (e) {
+    if (e instanceof ZodError) return back(url, { err: e.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    throw e;
+  }
+}
+
+const desktop = getWorker('desktop');
+const canDownload = desktop?.capabilities.includes('ytdlp') ?? false;
+const folders = desktop?.libraries.Video ?? [];
+const recent = db.select().from(tasks).where(eq(tasks.type, 'ytdlp')).orderBy(desc(tasks.id)).limit(20).all();
+const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const now = new Date();
+const stateStyle: Record<string, string> = {
+  queued: 'text-ink-300',
+  running: 'text-amber-300',
+  stalled: 'text-red-300',
+  done: 'text-emerald-300',
+  failed: 'text-red-300',
+  cancelled: 'text-ink-500',
+};
+---
+
+<Layout title="Download">
+  <h1 class="mb-2 text-2xl font-semibold tracking-tight">Download with yt-dlp</h1>
+  <p class="mb-4 max-w-3xl text-sm text-ink-400">
+    Runs on the desktop into <code class="text-ink-300">D:\Video\&lt;folder&gt;</code>, one file per video named by its title. Paste a video or a
+    whole playlist. "List only" shows what a playlist would fetch without downloading.
+  </p>
+  {
+    !canDownload && (
+      <p class="mb-4 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-2.5 text-sm text-amber-200">
+        The desktop worker hasn't reported download support yet{desktop && !workerOnline(desktop, now) ? ' (it is offline)' : ''}. Downloads queue up
+        and start once it does.
+      </p>
+    )
+  }
+
+  <form method="post" class="card mb-6 grid gap-4 p-5 sm:grid-cols-2">
+    <div class="space-y-1 sm:col-span-2">
+      <label for="url">Video or playlist URL</label>
+      <input id="url" name="url" type="url" required placeholder="https://www.youtube.com/playlist?list=…" class="w-full" />
+    </div>
+    <div class="space-y-1">
+      <label for="folder">Folder under D:\Video</label>
+      <input id="folder" name="folder" required list="folders" placeholder="e.g. Gunesin Dogdugu Yer" class="w-full" autocomplete="off" />
+      <datalist id="folders">{folders.map((f) => <option value={f} />)}</datalist>
+      <p class="text-xs text-ink-500">Pick an existing folder or type a new name.</p>
+    </div>
+    <div class="space-y-1">
+      <label for="max_height">Max resolution</label>
+      <select id="max_height" name="max_height" class="w-full">
+        {YTDLP_HEIGHTS.map((h) => <option value={h} selected={h === 720}>{h === 2160 ? '2160p (4K)' : `${h}p`}</option>)}
+        <option value="">Best available</option>
+      </select>
+    </div>
+    <div class="space-y-1">
+      <label for="sub_langs">Subtitle languages</label>
+      <input id="sub_langs" name="sub_langs" value="en" placeholder="none" class="w-full" />
+      <p class="text-xs text-ink-500">Comma-separated, e.g. <code>en</code>, <code>tr,en</code>, <code>en.*</code>. Empty for none.</p>
+    </div>
+    <div class="space-y-2 self-center text-sm">
+      <label class="flex items-center gap-2"><input type="checkbox" name="embed_subs" checked /> Embed subtitles in the .mkv</label>
+      <label class="flex items-center gap-2" title="YouTube's machine-generated captions. For Turkish shows, subgen-cli's transcription is better, and an existing .tr.srt makes it skip the episode.">
+        <input type="checkbox" name="auto_subs" /> Include auto-generated subtitles
+      </label>
+      <label class="flex items-center gap-2"><input type="checkbox" name="skip_downloaded" checked /> Skip videos downloaded before</label>
+    </div>
+    <div class="flex gap-2 sm:col-span-2">
+      <button class="btn btn-primary" name="_action" value="download">Download</button>
+      <button class="btn" name="_action" value="list">List only</button>
+    </div>
+  </form>
+
+  {
+    recent.length > 0 && (
+      <section class="card overflow-x-auto">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Download</th>
+              <th>URL</th>
+              <th>State</th>
+              <th>Queued</th>
+            </tr>
+          </thead>
+          <tbody>
+            {recent.map((t) => {
+              const state = taskState(t, now);
+              const p = t.params as { url?: string };
+              return (
+                <tr>
+                  <td>
+                    <a href={`/tasks/${t.id}`} class="hover:underline">
+                      {t.title}
+                    </a>
+                  </td>
+                  <td class="max-w-sm truncate text-xs text-ink-400" title={p.url}>
+                    {p.url}
+                  </td>
+                  <td class={stateStyle[state]}>{state}</td>
+                  <td class="tabular-nums text-ink-400">{fmt(t.createdAt)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </section>
+    )
+  }
+</Layout>

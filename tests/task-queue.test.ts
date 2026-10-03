@@ -17,6 +17,7 @@ import {
   taskTitle,
   withinHours,
   workerOnline,
+  ytdlpParams,
 } from '../src/lib/task-queue';
 
 describe('folderName', () => {
@@ -202,5 +203,34 @@ describe('matchesQuery', () => {
   it('matches everything for an empty query', () => {
     expect(matchesQuery('anything', '')).toBe(true);
     expect(matchesQuery('anything', '   ')).toBe(true);
+  });
+});
+
+describe('ytdlp params', () => {
+  const url = 'https://www.youtube.com/playlist?list=PLjkubelVcr02Bfvi0CUzHFD1F-RoGPVQd';
+
+  it('defaults to the owner usual: 720p, English subtitles embedded, skip downloaded', () => {
+    expect(ytdlpParams.parse({ url, folder: 'Show' })).toEqual({
+      url,
+      folder: 'Show',
+      maxHeight: 720,
+      subLangs: 'en',
+      embedSubs: true,
+      autoSubs: false,
+      skipDownloaded: true,
+      mode: 'download',
+    });
+    expect(ytdlpParams.parse({ url, folder: 'Show', maxHeight: null, subLangs: '' }).maxHeight).toBeNull();
+  });
+
+  it('refuses anything that is not a plain http(s) URL, folder or language list', () => {
+    const bad = [
+      { url: 'file:///C:/x', folder: 'Show' },
+      { url: 'https://a b', folder: 'Show' },
+      { url, folder: '../x' },
+      { url, folder: 'Show', maxHeight: 999 },
+      { url, folder: 'Show', subLangs: 'en --exec x' },
+    ];
+    for (const p of bad) expect(ytdlpParams.safeParse(p).success, JSON.stringify(p)).toBe(false);
   });
 });

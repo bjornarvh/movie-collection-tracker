@@ -231,7 +231,7 @@ export const workers = sqliteTable('workers', {
   lastSeenAt: timestamp('last_seen_at'),
 });
 
-export const TASK_TYPES = ['encode', 'handoff', 'reencode', 'purge-original', 'restore-original'] as const;
+export const TASK_TYPES = ['encode', 'handoff', 'reencode', 'purge-original', 'restore-original', 'ytdlp'] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_STATUSES = ['queued', 'running', 'done', 'failed', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];

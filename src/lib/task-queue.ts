@@ -85,6 +85,37 @@ export const heldParams = z.object({
     }, 'not a library file path'),
 });
 
+export const YTDLP_HEIGHTS = [2160, 1440, 1080, 720, 480] as const;
+
+/** yt-dlp on the desktop into D:\Video\<folder>; the worker builds the command (worker_tasks.plan_ytdlp). */
+export const ytdlpParams = z.object({
+  url: z
+    .string()
+    .trim()
+    .max(2000)
+    .refine((s) => /^https?:\/\/\S+$/i.test(s), 'only http(s) URLs'),
+  /** Existing or new folder under D:\Video. */
+  folder: folderName,
+  /** Cap on video height; null = best available. */
+  maxHeight: z
+    .number()
+    .int()
+    .refine((h) => (YTDLP_HEIGHTS as readonly number[]).includes(h), 'unsupported resolution')
+    .nullable()
+    .default(720),
+  /** yt-dlp --sub-langs, e.g. "en" or "tr,en.*"; empty = no subtitles. */
+  subLangs: z
+    .string()
+    .trim()
+    .regex(/^([A-Za-z0-9.*+-]{1,20}(,[A-Za-z0-9.*+-]{1,20}){0,9})?$/, 'language codes separated by commas')
+    .default('en'),
+  embedSubs: z.boolean().default(true),
+  autoSubs: z.boolean().default(false),
+  skipDownloaded: z.boolean().default(true),
+  /** "list" prints what would be downloaded without downloading. */
+  mode: z.enum(['download', 'list']).default('download'),
+});
+
 export type EncodeParams = z.infer<typeof encodeParams>;
 export type HandoffParams = z.infer<typeof handoffParams>;
 export type ReencodeParams = z.infer<typeof reencodeParams>;
@@ -95,6 +126,7 @@ export const PARAMS: Record<TaskType, z.ZodType> = {
   reencode: reencodeParams,
   'purge-original': heldParams,
   'restore-original': heldParams,
+  ytdlp: ytdlpParams,
 };
 
 // ---- re-encode results -----------------------------------------------------
@@ -192,6 +224,8 @@ export function taskTitle(
       return `Delete held original: ${leaf(params.relPath)}`;
     case 'restore-original':
       return `Restore original: ${leaf(params.relPath)}`;
+    case 'ytdlp':
+      return `Download${params.mode === 'list' ? ' (list only)' : ''}: ${params.folder}`;
     default:
       return `Encode: ${params.folder}${mode}`;
   }

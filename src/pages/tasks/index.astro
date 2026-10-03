@@ -3,7 +3,7 @@ import { ZodError } from 'zod';
 import Layout from '../../layouts/Layout.astro';
 import { back, str } from '../../lib/forms';
 import { ENCODE_MODES, parseHours, taskState, WORKER_ENCODERS, workerOnline } from '../../lib/task-queue';
-import { cancelTask, enqueue, getWorker, listWorkers, recentTasks, setWorker } from '../../lib/tasks';
+import { cancelTask, enqueue, getWorker, listWorkers, recentTasks, runningTasks, setWorker } from '../../lib/tasks';
 
 const url = Astro.url;
 
@@ -68,6 +68,7 @@ const desktop = workerRows.find((w) => w.name === 'desktop');
 const server = workerRows.find((w) => w.name === 'server');
 const folders = [...new Set([...(desktop?.inventory ?? []), ...(server?.inventory ?? [])])].sort((a, b) => a.localeCompare(b));
 const taskRows = recentTasks(60);
+const busyWith = new Map(runningTasks().map((t) => [t.worker, t]));
 const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '');
 const stateStyle: Record<string, string> = {
   queued: 'text-ink-300',
@@ -176,6 +177,14 @@ const stateStyle: Record<string, string> = {
                   <button class:list={['btn btn-sm', !w.paused && 'btn-primary']}>{w.paused ? 'Resume' : 'Pause'}</button>
                 </form>
               </div>
+              {busyWith.get(w.name) && (
+                <p class="text-xs text-amber-300">
+                  working on{' '}
+                  <a href={`/tasks/${busyWith.get(w.name)!.id}`} class="hover:underline">
+                    {busyWith.get(w.name)!.title}
+                  </a>
+                </p>
+              )}
               <p class="text-xs text-ink-500">
                 last seen {fmt(w.lastSeenAt) || 'never'} · {w.inventory.length} folders · {w.capabilities.join(', ') || 'no task types'}
               </p>

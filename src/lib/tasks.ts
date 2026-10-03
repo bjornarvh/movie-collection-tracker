@@ -89,6 +89,8 @@ export function updateTask(id: number, u: TaskUpdate, now = new Date()) {
     set.finishedAt = now;
   }
   const updated = db.update(tasks).set(set).where(eq(tasks.id, id)).returning().get();
+  // A busy worker reports to its task instead of polling; it is still online.
+  db.update(workers).set({ lastSeenAt: now }).where(eq(workers.name, task.worker)).run();
 
   if (updated.type === 'reencode' && u.result) applyReencode(u.result);
   if (updated.type === 'restore-original' && updated.status === 'done') applyRestore(updated.params.relPath as string, updated.id);
@@ -171,6 +173,11 @@ export const getTask = (id: number) => db.select().from(tasks).where(eq(tasks.id
 
 export function recentTasks(limit = 50): Task[] {
   return db.select().from(tasks).orderBy(desc(tasks.id)).limit(limit).all();
+}
+
+/** Tasks being worked on right now, one per worker at most. */
+export function runningTasks(): Task[] {
+  return db.select().from(tasks).where(eq(tasks.status, 'running')).all();
 }
 
 export function childTasks(id: number): Task[] {

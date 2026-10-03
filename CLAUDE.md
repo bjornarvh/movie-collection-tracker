@@ -4,18 +4,23 @@ Personal movie collection tracker. See README.md for features, configuration and
 
 ## Commands
 
+pnpm only (`packageManager` in package.json; CI installs with `--frozen-lockfile`), so don't create a `package-lock.json`.
+
 ```sh
-npm run dev      # dev server on :4321 (reads .env via process.loadEnvFile)
-npm test         # vitest: tests/*.test.ts, pure logic only
-npm run check    # astro check (TypeScript 6 — @astrojs/check doesn't support TS 7 yet)
-npm run build    # production build → dist/server/entry.mjs
-npm run db:generate  # after editing src/db/schema.ts
+pnpm dev         # dev server on :4321 (reads .env via process.loadEnvFile)
+pnpm test        # vitest: tests/*.test.ts, pure logic only
+pnpm vitest run tests/classify.test.ts   # one file; add -t "<name>" for one test
+pnpm run check   # astro check (TypeScript 6 — @astrojs/check doesn't support TS 7 yet)
+pnpm build       # production build → dist/server/entry.mjs
+pnpm db:generate # after editing src/db/schema.ts
 ```
+
+CI runs `pnpm test` and `pnpm run check` on every push and PR. A push to `main` also publishes `ghcr.io/bjornarvh/movie-collection-tracker:latest`, which the server runs (`../unraid-compose/compose/movie-tracker/`).
 
 ## Architecture
 
 - **Server-rendered Astro pages** handle their own form POSTs in the frontmatter, then redirect back with `?ok=`/`?err=` flash messages (`src/lib/forms.ts`).
-  - Client JS exists in only two places: the select-all script on /review, and the poller on /encodes.
+  - Client JS exists in only three places: the select-all script on /review, the poller on /encodes, and the 5 s reload on a live /tasks/{id}.
   - Keep it that way unless a page really needs interactivity.
 - **The /encodes poller doesn't render anything itself.**
   - It fetches `/encodes/current`, a `partial` Astro page holding the same `CurrentEncode` component, and swaps it in.
@@ -28,10 +33,17 @@ npm run db:generate  # after editing src/db/schema.ts
   - A running batch quiet for 10 min is shown as **stalled**. That is computed at read time, so it needs no cron (`runState`).
   - The next batch from the same host closes stalled batches as aborted.
   - Pure logic lives in `encode-progress.ts`, which has no db import, so vitest can load it.
+- **The task queue (`/tasks`) runs encodes on the desktop or the server**, through media-pipeline's `worker.py`.
+  - Workers poll: `POST /api/v1/workers/{name}/claim` records the worker's capabilities and encodable folders (`workers.inventory`) and hands out its oldest queued task. `PATCH /api/v1/tasks/{id}` appends output (capped tail, `appendLog`), heartbeats, finishes, and answers `cancel`.
+  - **A task is a type plus zod-validated params** (`src/lib/task-queue.ts`), never a command. Folder names are refused if they could leave a root, and the worker checks again against its own config.
+  - Workers are named `desktop` (NVENC) and `server` (x265). Choosing the server for a folder that is only on the desktop queues a `handoff` (copy to `_encode`); when it finishes, `updateTask` queues the server encode with `parent_id` set.
+  - Pause and allowed hours (`"22-7"`, server local time) only stop new claims; cancel stops a running task within a heartbeat.
+  - **A claim closes that worker's tasks still marked running.** An idle worker has none, so those died with a restart. A quiet running task shows as **stalled** after 10 min, computed at read time (`taskState`), like encode runs.
+  - The tables are named `tasks`/`workers`, separate from `encode_jobs`: an encode task's live progress still arrives through the `/api/v1/encodes` endpoints.
 - **`src/middleware.ts`** handles all auth.
   - API routes accept `Bearer` tokens.
   - Pages use the session cookie.
-  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip` or `/api`.
+  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks` or `/api`.
   - Cookie-authenticated writes need a same-origin `Origin`/`Referer`. Astro's own `checkOrigin` is off because it fails behind Caddy's TLS.
 - **Config is read from `process.env` at runtime** (`src/lib/config.ts`). Never read it from `import.meta.env`, which is inlined at build time.
 - **Data model:**

@@ -55,8 +55,10 @@ Send `Authorization: Bearer <token>`. Tokens are created on the Settings page.
 - `GET /api/v1/movies/{tmdbId}`: what you have of a movie (copies, files, wishlist).
 - `GET /api/v1/wishlist`: open wishlist items.
 - `POST /api/v1/scan`: start a Plex rescan.
+- `POST /api/v1/workers/{name}/claim` with `{ "capabilities": ["encode", "handoff"], "inventory": ["<folder>", …] }`: a worker asks for its next task from `/tasks`. Returns the task, or 204 when there is nothing to do (or it is paused or outside its hours).
+- `PATCH /api/v1/tasks/{id}` with `{ "status"?: "done|failed", "log"?: "<new output>", "exitCode"?: 0, "error"?: "…" }`: progress, heartbeat (`{}`) or the end of a task. Returns `{ "cancel": true }` when it should stop.
 
-The client for media-pipeline is `tracker.py` in that repo.
+The clients for media-pipeline are `tracker.py` (encode progress, ingest) and `worker.py` (tasks) in that repo.
 
 ## Deployment
 

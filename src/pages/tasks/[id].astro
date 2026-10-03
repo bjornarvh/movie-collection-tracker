@@ -1,0 +1,115 @@
+---
+import Layout from '../../layouts/Layout.astro';
+import { back, str } from '../../lib/forms';
+import { formatDuration } from '../../lib/encode-progress';
+import { taskState } from '../../lib/task-queue';
+import { cancelTask, childTasks, getTask, retryTask } from '../../lib/tasks';
+
+const task = getTask(Number(Astro.params.id));
+if (!task) return new Response('No such task', { status: 404 });
+const url = Astro.url;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  switch (str(form, '_action')) {
+    case 'cancel':
+      cancelTask(task.id);
+      return back(url, { ok: 'Cancelled.' });
+    case 'retry': {
+      const copy = retryTask(task);
+      return Astro.redirect(`/tasks/${copy.id}?ok=${encodeURIComponent('Queued again.')}`, 303);
+    }
+    default:
+      return back(url, { err: 'Unknown action.' });
+  }
+}
+
+const now = new Date();
+const state = taskState(task, now);
+const live = task.status === 'running' || task.status === 'queued';
+const children = childTasks(task.id);
+const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
+const end = task.finishedAt ?? (task.status === 'running' ? now : null);
+const rows: [string, string][] = [
+  ['Worker', task.worker],
+  ['State', state + (task.cancelRequested && task.status === 'running' ? ' (cancelling)' : '')],
+  ['Queued', fmt(task.createdAt)],
+  ['Started', fmt(task.startedAt)],
+  ['Finished', fmt(task.finishedAt)],
+  ['Duration', task.startedAt && end ? formatDuration((end.getTime() - task.startedAt.getTime()) / 1000) : '—'],
+  ['Exit code', task.exitCode?.toString() ?? '—'],
+];
+---
+
+<Layout title={task.title}>
+  <p class="mb-1 text-sm"><a href="/tasks" class="muted hover:underline">← Tasks</a></p>
+  <div class="mb-6 flex flex-wrap items-center gap-3">
+    <h1 class="text-2xl font-semibold tracking-tight">{task.title}</h1>
+    {
+      live && !task.cancelRequested && (
+        <form method="post">
+          <input type="hidden" name="_action" value="cancel" />
+          <button class="btn btn-sm btn-danger">Cancel</button>
+        </form>
+      )
+    }
+    {
+      !live && (
+        <form method="post">
+          <input type="hidden" name="_action" value="retry" />
+          <button class="btn btn-sm">Run again</button>
+        </form>
+      )
+    }
+    {task.type === 'encode' && task.status === 'running' && <a href="/encodes" class="btn btn-sm">Live progress</a>}
+  </div>
+
+  <div class="grid gap-6 lg:grid-cols-[20rem_1fr]">
+    <div class="space-y-4 self-start">
+      <dl class="card divide-y divide-ink-800 text-sm">
+        {
+          rows.map(([k, v]) => (
+            <div class="flex justify-between gap-4 px-4 py-2">
+              <dt class="muted">{k}</dt>
+              <dd class="text-right">{v}</dd>
+            </div>
+          ))
+        }
+      </dl>
+      <div class="card p-4 text-sm">
+        <p class="muted mb-1 text-xs">Parameters</p>
+        <pre class="whitespace-pre-wrap text-xs text-ink-300">{JSON.stringify(task.params, null, 2)}</pre>
+      </div>
+      {task.parentId && <a href={`/tasks/${task.parentId}`} class="block text-sm hover:underline">Queued by task {task.parentId}</a>}
+      {
+        children.map((c) => (
+          <a href={`/tasks/${c.id}`} class="block text-sm hover:underline">
+            Next: {c.title} ({c.status})
+          </a>
+        ))
+      }
+    </div>
+    <section class="card min-w-0 p-4">
+      {task.error && <p class="mb-3 rounded-md bg-red-950/60 px-3 py-2 text-sm text-red-200">{task.error}</p>}
+      <h2 class="mb-2 text-lg font-semibold">Output</h2>
+      {
+        task.log ? (
+          <pre id="log" class="max-h-[70vh] overflow-auto rounded-lg bg-ink-950 p-3 text-xs whitespace-pre-wrap text-ink-300">{task.log}</pre>
+        ) : (
+          <p class="text-sm text-ink-500">{task.status === 'queued' ? 'Waiting for the worker.' : 'No output.'}</p>
+        )
+      }
+    </section>
+  </div>
+</Layout>
+
+{
+  live && (
+    <script>
+      // While the task is queued or running, reload every 5 s (scrolled to the end of the log).
+      const log = document.getElementById('log');
+      if (log) log.scrollTop = log.scrollHeight;
+      setTimeout(() => location.reload(), 5000);
+    </script>
+  )
+}

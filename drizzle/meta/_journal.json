@@ -15,6 +15,13 @@
       "when": 1790834821907,
       "tag": "0001_encodes",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1791015364585,
+      "tag": "0002_tasks",
+      "breakpoints": true
     }
   ]
 }

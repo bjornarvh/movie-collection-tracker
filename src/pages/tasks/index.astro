@@ -1,0 +1,242 @@
+---
+import { ZodError } from 'zod';
+import Layout from '../../layouts/Layout.astro';
+import { back, str } from '../../lib/forms';
+import { ENCODE_MODES, parseHours, taskState, WORKER_ENCODERS, workerOnline } from '../../lib/task-queue';
+import { cancelTask, enqueue, getWorker, listWorkers, recentTasks, setWorker } from '../../lib/tasks';
+
+const url = Astro.url;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  switch (str(form, '_action')) {
+    case 'encode': {
+      const folder = str(form, 'folder');
+      const target = str(form, 'target') === 'server' ? 'server' : 'desktop';
+      const maxHeight = str(form, 'max_height');
+      const quality = str(form, 'quality');
+      const options = {
+        library: str(form, 'library') || 'Movies',
+        mode: str(form, 'mode'),
+        film: form.get('film') === 'on',
+        maxHeight: maxHeight === '' ? null : Number(maxHeight),
+        quality: quality === '' ? null : Number(quality),
+      };
+      const onDesktop = getWorker('desktop')?.inventory.includes(folder) ?? false;
+      const onServer = getWorker('server')?.inventory.includes(folder) ?? false;
+      try {
+        if (target === 'desktop') {
+          if (!onDesktop) return back(url, { err: `"${folder}" is not in the desktop's _to_encode folder.` });
+          enqueue('encode', 'desktop', { folder, ...options });
+          return back(url, { ok: `Queued on the desktop: ${folder}` });
+        }
+        if (onServer) {
+          enqueue('encode', 'server', { folder, ...options });
+          return back(url, { ok: `Queued on the server: ${folder}` });
+        }
+        if (!onDesktop) return back(url, { err: `"${folder}" is in neither _to_encode nor the server's _encode folder.` });
+        enqueue('handoff', 'desktop', { folder, then: options });
+        return back(url, { ok: `The desktop will copy "${folder}" to the server, then the server encodes it.` });
+      } catch (e) {
+        if (e instanceof ZodError) return back(url, { err: e.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+        throw e;
+      }
+    }
+    case 'pause':
+    case 'resume': {
+      setWorker(str(form, 'worker'), { paused: str(form, '_action') === 'pause' });
+      return back(url, { ok: str(form, '_action') === 'pause' ? 'Paused. A running task keeps going; cancel it below if needed.' : 'Resumed.' });
+    }
+    case 'hours': {
+      const spec = str(form, 'allowed_hours');
+      if (spec && !parseHours(spec)) return back(url, { err: 'Hours look like "22-7" (overnight) or "9-17". Empty means any time.' });
+      setWorker(str(form, 'worker'), { allowedHours: spec || null });
+      return back(url, { ok: spec ? `Starts tasks only between ${spec}.` : 'Starts tasks any time.' });
+    }
+    case 'cancel': {
+      cancelTask(Number(str(form, 'task_id')));
+      return back(url, { ok: 'Cancelled (a running task stops within half a minute).' });
+    }
+    default:
+      return back(url, { err: 'Unknown action.' });
+  }
+}
+
+const now = new Date();
+const workerRows = listWorkers();
+const desktop = workerRows.find((w) => w.name === 'desktop');
+const server = workerRows.find((w) => w.name === 'server');
+const folders = [...new Set([...(desktop?.inventory ?? []), ...(server?.inventory ?? [])])].sort((a, b) => a.localeCompare(b));
+const taskRows = recentTasks(60);
+const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const stateStyle: Record<string, string> = {
+  queued: 'text-ink-300',
+  running: 'text-amber-300',
+  stalled: 'text-red-300',
+  done: 'text-emerald-300',
+  failed: 'text-red-300',
+  cancelled: 'text-ink-500',
+};
+---
+
+<Layout title="Tasks">
+  <h1 class="mb-6 text-2xl font-semibold tracking-tight">Tasks</h1>
+
+  <div class="mb-6 grid gap-6 lg:grid-cols-[1fr_22rem]">
+    <section class="card p-5">
+      <h2 class="mb-1 text-lg font-semibold">Encode a folder</h2>
+      <p class="mb-4 text-sm text-ink-400">
+        Desktop: NVENC on the GPU, fast. Server: x265 on the CPU, overnight, smaller files. A desktop folder sent to the server is copied to its
+        <code class="text-ink-300">_encode</code> folder first. Start with a test sample to check quality (and, on the server, speed).
+      </p>
+      {
+        folders.length === 0 ? (
+          <p class="text-sm text-ink-500">No folders reported yet. Start the desktop worker, and triage a rip into _to_encode.</p>
+        ) : (
+          <form method="post" class="grid gap-3 sm:grid-cols-2">
+            <input type="hidden" name="_action" value="encode" />
+            <div class="space-y-1 sm:col-span-2">
+              <label for="folder">Folder</label>
+              <select id="folder" name="folder" required class="w-full">
+                {folders.map((f) => (
+                  <option value={f}>
+                    {f}
+                    {server?.inventory.includes(f) ? '  (on server)' : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <fieldset class="space-y-1 sm:col-span-2">
+              <legend class="text-sm text-ink-300">Where</legend>
+              <div class="flex flex-wrap gap-4 text-sm">
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="target" value="desktop" checked /> Desktop: {WORKER_ENCODERS.desktop}, fast
+                </label>
+                <label class="flex items-center gap-2">
+                  <input type="radio" name="target" value="server" /> Server: {WORKER_ENCODERS.server}, overnight, smaller
+                </label>
+              </div>
+            </fieldset>
+            <div class="space-y-1">
+              <label for="mode">Run</label>
+              <select id="mode" name="mode" class="w-full">
+                {ENCODE_MODES.map((m) => (
+                  <option value={m}>{m === 'test' ? 'Test sample (5 min)' : m === 'dry-run' ? 'Dry run (decisions only)' : 'Full encode'}</option>
+                ))}
+              </select>
+            </div>
+            <div class="space-y-1">
+              <label for="max_height">Resolution</label>
+              <select id="max_height" name="max_height" class="w-full">
+                <option value="">Profile default</option>
+                <option value="0">Keep source (4K stays 4K)</option>
+                <option value="1080">Cap at 1080p</option>
+              </select>
+            </div>
+            <div class="space-y-1">
+              <label for="quality">Quality (lower = better, larger)</label>
+              <input id="quality" name="quality" type="number" min="10" max="35" placeholder="default" class="w-full" />
+              <p class="text-xs text-ink-500">
+                Server CRF: 19 HD/4K, 23 DVD, 18 with --film. Desktop CQ: 23, 27, 20. A number here overrides it for every file in the folder.
+              </p>
+            </div>
+            <div class="space-y-1">
+              <label for="library">Library folder</label>
+              <input id="library" name="library" value="Movies" class="w-full" />
+            </div>
+            <label class="flex items-center gap-2 self-end pb-2">
+              <input type="checkbox" name="film" /> High-motion film (--film)
+            </label>
+            <div class="sm:col-span-2">
+              <button class="btn btn-primary">Queue</button>
+            </div>
+          </form>
+        )
+      }
+    </section>
+
+    <section class="card p-5">
+      <h2 class="mb-3 text-lg font-semibold">Workers</h2>
+      {workerRows.length === 0 && <p class="text-sm text-ink-500">No worker has polled yet.</p>}
+      <ul class="space-y-4">
+        {
+          workerRows.map((w) => (
+            <li class="text-sm">
+              <div class="flex items-center justify-between gap-2">
+                <span class="font-medium">
+                  {w.name}
+                  <span class:list={['ml-2 text-xs', workerOnline(w, now) ? 'text-emerald-300' : 'text-ink-500']}>
+                    {workerOnline(w, now) ? 'online' : 'offline'}
+                  </span>
+                  {w.paused && <span class="ml-1 text-xs text-amber-300">paused</span>}
+                </span>
+                <form method="post">
+                  <input type="hidden" name="_action" value={w.paused ? 'resume' : 'pause'} />
+                  <input type="hidden" name="worker" value={w.name} />
+                  <button class:list={['btn btn-sm', !w.paused && 'btn-primary']}>{w.paused ? 'Resume' : 'Pause'}</button>
+                </form>
+              </div>
+              <p class="text-xs text-ink-500">
+                last seen {fmt(w.lastSeenAt) || 'never'} · {w.inventory.length} folders · {w.capabilities.join(', ') || 'no task types'}
+              </p>
+              <form method="post" class="mt-1 flex items-center gap-2">
+                <input type="hidden" name="_action" value="hours" />
+                <input type="hidden" name="worker" value={w.name} />
+                <input name="allowed_hours" value={w.allowedHours ?? ''} placeholder="any time" class="w-24 py-1 text-xs" aria-label="Allowed hours" />
+                <button class="btn btn-sm">Set hours</button>
+              </form>
+            </li>
+          ))
+        }
+      </ul>
+    </section>
+  </div>
+
+  <section class="card overflow-x-auto">
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Task</th>
+          <th>Worker</th>
+          <th>State</th>
+          <th>Queued</th>
+          <th>Finished</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          taskRows.map((t) => {
+            const state = taskState(t, now);
+            return (
+              <tr>
+                <td>
+                  <a href={`/tasks/${t.id}`} class="hover:underline">
+                    {t.title}
+                  </a>
+                </td>
+                <td class="text-ink-400">{t.worker}</td>
+                <td class={stateStyle[state]}>
+                  {state}
+                  {t.cancelRequested && t.status === 'running' && ' (cancelling)'}
+                </td>
+                <td class="tabular-nums text-ink-400">{fmt(t.createdAt)}</td>
+                <td class="tabular-nums text-ink-400">{fmt(t.finishedAt)}</td>
+                <td class="text-right">
+                  {(t.status === 'queued' || (t.status === 'running' && !t.cancelRequested)) && (
+                    <form method="post">
+                      <input type="hidden" name="_action" value="cancel" />
+                      <input type="hidden" name="task_id" value={t.id} />
+                      <button class="btn btn-sm btn-danger">Cancel</button>
+                    </form>
+                  )}
+                </td>
+              </tr>
+            );
+          })
+        }
+      </tbody>
+    </table>
+    {taskRows.length === 0 && <p class="p-4 text-sm text-ink-500">Nothing queued yet.</p>}
+  </section>
+</Layout>

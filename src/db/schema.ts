@@ -210,6 +210,58 @@ export const encodeJobs = sqliteTable(
 export type EncodeRun = typeof encodeRuns.$inferSelect;
 export type EncodeJob = typeof encodeJobs.$inferSelect;
 
+/**
+ * A machine running media-pipeline's worker.py. Workers poll for tasks; nothing
+ * ever calls into them, so the desktop needs no open port.
+ */
+export const workers = sqliteTable('workers', {
+  name: text('name').primaryKey(),
+  /** Task types the worker said it can run, sent with every poll. */
+  capabilities: text('capabilities', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
+  /** Folders it can encode from (`_to_encode` on the desktop, `_encode` on the server). */
+  inventory: text('inventory', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
+  /** Paused workers keep running what they have but claim nothing new. */
+  paused: integer('paused', { mode: 'boolean' }).notNull().default(false),
+  /** Local hours it may start tasks, e.g. "22-7"; null = any time. */
+  allowedHours: text('allowed_hours'),
+  lastSeenAt: timestamp('last_seen_at'),
+});
+
+export const TASK_TYPES = ['encode', 'handoff'] as const;
+export type TaskType = (typeof TASK_TYPES)[number];
+export const TASK_STATUSES = ['queued', 'running', 'done', 'failed', 'cancelled'] as const;
+export type TaskStatus = (typeof TASK_STATUSES)[number];
+
+/** A unit of work queued from the tracker and run by one named worker. */
+export const tasks = sqliteTable(
+  'tasks',
+  {
+    id: integer('id').primaryKey({ autoIncrement: true }),
+    type: text('type', { enum: TASK_TYPES }).notNull(),
+    /** Which worker runs it: the encode form's desktop/server choice. */
+    worker: text('worker').notNull(),
+    params: text('params', { mode: 'json' }).$type<Record<string, unknown>>().notNull(),
+    status: text('status', { enum: TASK_STATUSES }).notNull().default('queued'),
+    /** A short label for lists, e.g. the folder name. */
+    title: text('title').notNull(),
+    createdAt: timestamp('created_at').notNull().default(now),
+    startedAt: timestamp('started_at'),
+    finishedAt: timestamp('finished_at'),
+    /** Bumped by every report from the worker; a running task that goes quiet is stalled. */
+    lastSeenAt: timestamp('last_seen_at'),
+    exitCode: integer('exit_code'),
+    log: text('log').notNull().default(''),
+    error: text('error'),
+    cancelRequested: integer('cancel_requested', { mode: 'boolean' }).notNull().default(false),
+    /** The task this one was queued by (a handoff queues the server encode). */
+    parentId: integer('parent_id'),
+  },
+  (t) => [index('tasks_queue_idx').on(t.worker, t.status, t.id)],
+);
+
+export type Worker = typeof workers.$inferSelect;
+export type Task = typeof tasks.$inferSelect;
+
 export type Movie = typeof movies.$inferSelect;
 export type Copy = typeof copies.$inferSelect;
 export type MediaFile = typeof files.$inferSelect;

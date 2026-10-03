@@ -41,21 +41,143 @@ export const handoffParams = z.object({
   then: encodeParams.omit({ folder: true }).nullable().default(null),
 });
 
+/** A single .mkv file name under the same rules as a folder name. */
+export const fileName = folderName.refine((s) => s.toLowerCase().endsWith('.mkv'), 'not an .mkv file');
+
+/** "<folder>" or, for TV, "<show>/<season>". */
+export const libraryFolder = z
+  .string()
+  .trim()
+  .refine((s) => {
+    const parts = s.split('/');
+    return parts.length >= 1 && parts.length <= 2 && parts.every((p) => folderName.safeParse(p).success);
+  }, 'not "<folder>" or "<show>/<season>"');
+
+export const REENCODE_LIBRARIES = ['Movies', 'TV Shows'] as const;
+
+/** Re-encode a library file (or every file of a show/season) in place on the server; see reencode.py. */
+export const reencodeParams = z.object({
+  library: z.enum(REENCODE_LIBRARIES),
+  folder: libraryFolder,
+  /** One file in the folder; null = every .mkv in it (a show or season). */
+  file: fileName.nullable().default(null),
+  mode: z.enum(['test', 'full']).default('test'),
+  film: z.boolean().default(false),
+  maxHeight: z.number().int().min(0).max(4320).nullable().default(null),
+  quality: z.number().int().min(10).max(35).nullable().default(null),
+  /** Re-encode HEVC sources too (normally skipped). */
+  force: z.boolean().default(false),
+});
+
+/** A library file path held in _replaced: "<library>/<folder>[/<season>]/<file>.mkv". */
+export const heldParams = z.object({
+  relPath: z
+    .string()
+    .refine((s) => {
+      const parts = s.split('/');
+      return (
+        parts.length >= 3 &&
+        parts.length <= 4 &&
+        (REENCODE_LIBRARIES as readonly string[]).includes(parts[0]) &&
+        parts.slice(1, -1).every((p) => folderName.safeParse(p).success) &&
+        fileName.safeParse(parts.at(-1)).success
+      );
+    }, 'not a library file path'),
+});
+
 export type EncodeParams = z.infer<typeof encodeParams>;
 export type HandoffParams = z.infer<typeof handoffParams>;
+export type ReencodeParams = z.infer<typeof reencodeParams>;
 
 export const PARAMS: Record<TaskType, z.ZodType> = {
   encode: encodeParams,
   handoff: handoffParams,
+  reencode: reencodeParams,
+  'purge-original': heldParams,
+  'restore-original': heldParams,
 };
+
+// ---- re-encode results -----------------------------------------------------
+
+/** One file in reencode.py's --result JSON. */
+export type ReencodeFile = {
+  relPath: string;
+  status: 'replaced' | 'sample' | 'skipped' | 'failed';
+  reason?: string;
+  oldSize?: number;
+  newSize?: number;
+};
+
+export type HeldOriginal = {
+  relPath: string;
+  /** "original" while the encode is in the library; "encode" after a restore. */
+  kind: 'original' | 'encode';
+  oldSize: number | null;
+  newSize: number | null;
+  since: Date | null;
+  taskId: number;
+};
+
+type ResultRow = { id: number; type: string; status: string; finishedAt: Date | null; result: Record<string, unknown> | null };
+
+/**
+ * What sits in _replaced right now, replayed from finished tasks in order: a
+ * replace holds the original, a restore swaps in the encode, a purge empties it.
+ * Derived rather than stored, so the list can't drift from what the worker did.
+ */
+export function heldOriginals(rows: ResultRow[]): HeldOriginal[] {
+  const held = new Map<string, HeldOriginal>();
+  for (const row of [...rows].sort((a, b) => a.id - b.id)) {
+    if (row.status !== 'done' && row.type !== 'reencode') continue;
+    const result = row.result ?? {};
+    if (row.type === 'reencode') {
+      for (const f of (result.files as ReencodeFile[] | undefined) ?? []) {
+        if (f.status !== 'replaced') continue;
+        held.set(f.relPath, {
+          relPath: f.relPath,
+          kind: 'original',
+          oldSize: f.oldSize ?? null,
+          newSize: f.newSize ?? null,
+          since: row.finishedAt,
+          taskId: row.id,
+        });
+      }
+    } else if (row.type === 'restore-original') {
+      const item = held.get(result.relPath as string);
+      if (item) held.set(item.relPath, { ...item, kind: 'encode', since: row.finishedAt, taskId: row.id });
+    } else if (row.type === 'purge-original') {
+      held.delete(result.relPath as string);
+    }
+  }
+  return [...held.values()].sort((a, b) => a.relPath.localeCompare(b.relPath));
+}
+
+/** Bytes per hour of runtime, for ranking remuxes; null without both numbers. */
+export function bytesPerHour(sizeBytes: number | null, durationS: number | null) {
+  return sizeBytes && durationS ? sizeBytes / (durationS / 3600) : null;
+}
 
 /** The encoder each worker uses; the worker's own config is what actually decides. */
 export const WORKER_ENCODERS: Record<string, string> = { desktop: 'NVENC (GPU)', server: 'x265 (CPU)' };
 
-export function taskTitle(type: TaskType, params: { folder?: string; mode?: string; then?: { mode?: string } | null }) {
+export function taskTitle(
+  type: TaskType,
+  params: { folder?: string; mode?: string; file?: string | null; relPath?: string; then?: { mode?: string } | null },
+) {
   const mode = params.mode && params.mode !== 'full' ? ` (${params.mode})` : '';
-  if (type === 'handoff') return `Copy to server: ${params.folder}`;
-  return `Encode: ${params.folder}${mode}`;
+  const leaf = (p?: string) => p?.split('/').at(-1) ?? '';
+  switch (type) {
+    case 'handoff':
+      return `Copy to server: ${params.folder}`;
+    case 'reencode':
+      return `Re-encode: ${params.file ?? params.folder}${mode}`;
+    case 'purge-original':
+      return `Delete held original: ${leaf(params.relPath)}`;
+    case 'restore-original':
+      return `Restore original: ${leaf(params.relPath)}`;
+    default:
+      return `Encode: ${params.folder}${mode}`;
+  }
 }
 
 // ---- worker API bodies -----------------------------------------------------
@@ -63,6 +185,7 @@ export function taskTitle(type: TaskType, params: { folder?: string; mode?: stri
 export const claimSchema = z.object({
   capabilities: z.array(z.string().max(50)).max(50).default([]),
   inventory: z.array(z.string().max(255)).max(2000).default([]),
+  libraries: z.record(z.string().max(100), z.array(z.string().max(600)).max(2000)).default({}),
 });
 
 export const taskUpdateSchema = z.object({
@@ -71,6 +194,7 @@ export const taskUpdateSchema = z.object({
   log: z.string().max(1_000_000).optional(),
   exitCode: z.number().int().optional(),
   error: z.string().max(2000).optional(),
+  result: z.record(z.string(), z.unknown()).optional(),
 });
 
 export type ClaimRequest = z.infer<typeof claimSchema>;

@@ -96,6 +96,8 @@ export const files = sqliteTable(
     hdr: text('hdr', { enum: HDR_TYPES }),
     dvProfile: integer('dv_profile'),
     codec: text('codec'),
+    /** Runtime from Plex, so /reencode can rank files by size per hour. */
+    durationS: integer('duration_s'),
     container: text('container'),
     sizeBytes: integer('size_bytes'),
     parts: integer('parts').notNull().default(1),
@@ -220,6 +222,8 @@ export const workers = sqliteTable('workers', {
   capabilities: text('capabilities', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
   /** Folders it can encode from (`_to_encode` on the desktop, `_encode` on the server). */
   inventory: text('inventory', { mode: 'json' }).$type<string[]>().notNull().default(sql`'[]'`),
+  /** Show and season folders per library it can re-encode, e.g. {"TV Shows": ["Shogun {tmdb-1}/Season 01"]}. */
+  libraries: text('libraries', { mode: 'json' }).$type<Record<string, string[]>>().notNull().default(sql`'{}'`),
   /** Paused workers keep running what they have but claim nothing new. */
   paused: integer('paused', { mode: 'boolean' }).notNull().default(false),
   /** Local hours it may start tasks, e.g. "22-7"; null = any time. */
@@ -227,7 +231,7 @@ export const workers = sqliteTable('workers', {
   lastSeenAt: timestamp('last_seen_at'),
 });
 
-export const TASK_TYPES = ['encode', 'handoff'] as const;
+export const TASK_TYPES = ['encode', 'handoff', 'reencode', 'purge-original', 'restore-original'] as const;
 export type TaskType = (typeof TASK_TYPES)[number];
 export const TASK_STATUSES = ['queued', 'running', 'done', 'failed', 'cancelled'] as const;
 export type TaskStatus = (typeof TASK_STATUSES)[number];
@@ -252,6 +256,8 @@ export const tasks = sqliteTable(
     exitCode: integer('exit_code'),
     log: text('log').notNull().default(''),
     error: text('error'),
+    /** What the worker reported back, e.g. reencode.py's per-file summary. */
+    result: text('result', { mode: 'json' }).$type<Record<string, unknown>>(),
     cancelRequested: integer('cancel_requested', { mode: 'boolean' }).notNull().default(false),
     /** The task this one was queued by (a handoff queues the server encode). */
     parentId: integer('parent_id'),

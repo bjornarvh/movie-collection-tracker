@@ -40,10 +40,14 @@ CI runs `pnpm test` and `pnpm run check` on every push and PR. A push to `main` 
   - Pause and allowed hours (`"22-7"`, server local time) only stop new claims; cancel stops a running task within a heartbeat.
   - **A claim closes that worker's tasks still marked running.** An idle worker has none, so those died with a restart. A quiet running task shows as **stalled** after 10 min, computed at read time (`taskState`), like encode runs.
   - The tables are named `tasks`/`workers`, separate from `encode_jobs`: an encode task's live progress still arrives through the `/api/v1/encodes` endpoints.
+- **`/reencode` queues in-place re-encodes of library files on the server** (media-pipeline's `reencode.py`).
+  - The Movies tab lists `Movies/<folder>/<file>.mkv` rows from `files`. Non-HEVC files show by default, ranked by GB/hour (`files.duration_s` from Plex's `Media.duration`, falling back to TMDB runtime). The TV Shows tab lists the show and season folders the server reports (`workers.libraries`).
+  - **The file keeps its path,** so its row and copy link stay, and re-encodes never call ingest (it would force a pirated copy to owned). When a result arrives, `applyReencode` sets codec and size on the row at once; `applyRestore` puts the original size back and clears codec for the next scan.
+  - **Originals wait in `_replaced` until the owner deletes or restores them.** The "held" list is derived from finished task results (`heldOriginals` replays replace, restore and purge in task order), not stored, so it can't drift from what the worker did.
 - **`src/middleware.ts`** handles all auth.
   - API routes accept `Bearer` tokens.
   - Pages use the session cookie.
-  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks` or `/api`.
+  - Guests are read-only and can't reach `/add`, `/review`, `/settings`, `/upgrades`, `/encodes`, `/to-rip`, `/tasks`, `/reencode` or `/api`.
   - Cookie-authenticated writes need a same-origin `Origin`/`Referer`. Astro's own `checkOrigin` is off because it fails behind Caddy's TLS.
 - **Config is read from `process.env` at runtime** (`src/lib/config.ts`). Never read it from `import.meta.env`, which is inlined at build time.
 - **Data model:**

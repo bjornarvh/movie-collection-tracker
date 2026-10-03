@@ -19,6 +19,8 @@ export type PlexMedia = {
   videoResolution?: string;
   videoCodec?: string;
   container?: string;
+  /** Runtime in milliseconds (all parts of a stacked movie). */
+  duration?: number;
   Part: PlexPart[];
 };
 

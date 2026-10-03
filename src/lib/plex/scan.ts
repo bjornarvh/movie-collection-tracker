@@ -123,6 +123,7 @@ function mediaSummary(media: PlexMedia) {
     height: media.height ?? null,
     codec: media.videoCodec ?? null,
     container: media.container ?? null,
+    durationS: media.duration ? Math.round(media.duration / 1000) : null,
   };
 }
 

@@ -1,0 +1,327 @@
+---
+import { and, eq, like } from 'drizzle-orm';
+import { ZodError } from 'zod';
+import OwnershipBadge from '../components/OwnershipBadge.astro';
+import { db } from '../db/client';
+import { copies, files, movies } from '../db/schema';
+import Layout from '../layouts/Layout.astro';
+import { back, str } from '../lib/forms';
+import { formatBytes, resolutionLabel } from '../lib/formats';
+import { bytesPerHour, workerOnline } from '../lib/task-queue';
+import { enqueue, getWorker, listHeldOriginals, openReencodeTasks } from '../lib/tasks';
+
+const url = Astro.url;
+const tab = url.searchParams.get('tab') === 'tv' ? 'tv' : 'movies';
+const showAll = url.searchParams.get('all') === '1';
+const keep = ['tab', 'all'];
+
+function options(form: FormData) {
+  const maxHeight = str(form, 'max_height');
+  const quality = str(form, 'quality');
+  return {
+    mode: str(form, 'mode') === 'full' ? 'full' : 'test',
+    film: form.get('film') === 'on',
+    force: form.get('force') === 'on',
+    maxHeight: maxHeight === '' ? null : Number(maxHeight),
+    quality: quality === '' ? null : Number(quality),
+  };
+}
+
+const movieFiles = () =>
+  db
+    .select({
+      relPath: files.relPath,
+      codec: files.codec,
+      width: files.width,
+      height: files.height,
+      hdr: files.hdr,
+      dvProfile: files.dvProfile,
+      sizeBytes: files.sizeBytes,
+      durationS: files.durationS,
+      runtime: movies.runtime,
+      title: movies.title,
+      year: movies.year,
+      tmdbId: movies.tmdbId,
+      ownership: copies.ownership,
+    })
+    .from(files)
+    .innerJoin(movies, eq(movies.id, files.movieId))
+    .leftJoin(copies, eq(copies.id, files.copyId))
+    .where(and(eq(files.missing, false), like(files.relPath, 'Movies/%')))
+    .all()
+    // Only "Movies/<folder>/<file>.mkv" can be re-encoded in place; extras and
+    // other layouts are left alone.
+    .filter((f) => {
+      const parts = f.relPath.split('/');
+      return parts.length === 3 && parts[2].toLowerCase().endsWith('.mkv');
+    });
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData();
+  try {
+    switch (str(form, '_action')) {
+      case 'movies': {
+        const chosen = new Set(form.getAll('file').map(String));
+        const valid = movieFiles().filter((f) => chosen.has(f.relPath));
+        if (!valid.length) return back(url, { err: 'Tick at least one file.' }, keep);
+        const opts = options(form);
+        for (const f of valid) {
+          const [, folder, file] = f.relPath.split('/');
+          enqueue('reencode', 'server', { library: 'Movies', folder, file, ...opts });
+        }
+        return back(url, { ok: `Queued ${valid.length} re-encode${valid.length > 1 ? 's' : ''} (${opts.mode}) on the server.` }, keep);
+      }
+      case 'tv': {
+        const known = new Set(getWorker('server')?.libraries['TV Shows'] ?? []);
+        const chosen = form.getAll('folder').map(String).filter((f) => known.has(f));
+        if (!chosen.length) return back(url, { err: 'Tick at least one show or season.' }, keep);
+        const opts = options(form);
+        for (const folder of chosen) enqueue('reencode', 'server', { library: 'TV Shows', folder, file: null, ...opts });
+        return back(url, { ok: `Queued ${chosen.length} re-encode${chosen.length > 1 ? 's' : ''} (${opts.mode}) on the server.` }, keep);
+      }
+      case 'purge':
+      case 'restore': {
+        const relPath = str(form, 'rel_path');
+        if (!listHeldOriginals().some((h) => h.relPath === relPath)) return back(url, { err: 'Nothing is held for that file.' }, keep);
+        enqueue(str(form, '_action') === 'purge' ? 'purge-original' : 'restore-original', 'server', { relPath });
+        return back(url, { ok: str(form, '_action') === 'purge' ? 'Queued: delete the held file.' : 'Queued: restore the original.' }, keep);
+      }
+      case 'purge_all': {
+        const held = listHeldOriginals();
+        for (const h of held) enqueue('purge-original', 'server', { relPath: h.relPath });
+        return back(url, { ok: `Queued deletion of ${held.length} held file${held.length === 1 ? '' : 's'}.` }, keep);
+      }
+      default:
+        return back(url, { err: 'Unknown action.' }, keep);
+    }
+  } catch (e) {
+    if (e instanceof ZodError) return back(url, { err: e.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') }, keep);
+    throw e;
+  }
+}
+
+const server = getWorker('server');
+const canReencode = server?.capabilities.includes('reencode') ?? false;
+const open = openReencodeTasks();
+const openByPath = new Map<string, string>();
+for (const t of open) {
+  const p = t.params as { library?: string; folder?: string; file?: string | null; relPath?: string };
+  const key = p.relPath ?? [p.library, p.folder, p.file].filter(Boolean).join('/');
+  openByPath.set(key, t.status);
+}
+const held = listHeldOriginals();
+const heldBytes = held.reduce((sum, h) => sum + ((h.kind === 'original' ? h.oldSize : h.newSize) ?? 0), 0);
+const heldPaths = new Set(held.map((h) => h.relPath));
+
+const rows = movieFiles()
+  .map((f) => ({ ...f, bph: bytesPerHour(f.sizeBytes, f.durationS ?? (f.runtime ? f.runtime * 60 : null)) }))
+  .filter((f) => showAll || f.codec?.toLowerCase() !== 'hevc')
+  .sort((a, b) => (b.bph ?? -1) - (a.bph ?? -1) || a.title.localeCompare(b.title));
+const tvFolders = server?.libraries['TV Shows'] ?? [];
+const gbh = (bph: number | null) => (bph ? `${(bph / 1024 ** 3).toFixed(1)} GB/h` : '');
+const fmt = (d: Date | null) => (d ? d.toLocaleString('en-GB', { dateStyle: 'medium', timeStyle: 'short' }) : '');
+const tabLink = (t: string) => `/reencode?tab=${t}${showAll ? '&all=1' : ''}`;
+---
+
+<Layout title="Re-encode">
+  <h1 class="mb-2 text-2xl font-semibold tracking-tight">Re-encode library files</h1>
+  <p class="mb-4 max-w-3xl text-sm text-ink-400">
+    Runs on the server (x265), replacing the file in place under the same name, so Plex and the collection keep it. The original is moved to
+    <code class="text-ink-300">_replaced</code> and stays there until you delete or restore it below. The usual track policy applies: only the
+    original-language and Norwegian audio (best track each) and Norwegian/English subtitles are kept, so commentaries, other dubs and
+    compatibility tracks are dropped. Each encode needs free space of roughly 70% of the source while it runs. HEVC files are skipped unless forced.
+  </p>
+  {
+    !canReencode && (
+      <p class="mb-4 rounded-lg border border-amber-800 bg-amber-950/40 px-4 py-2.5 text-sm text-amber-200">
+        The server worker hasn't reported re-encode support yet{server && !workerOnline(server) ? ' (it is offline)' : ''}. Tasks queue up and
+        run once it does.
+      </p>
+    )
+  }
+
+  <div class="mb-4 flex flex-wrap items-center gap-2">
+    <a href={tabLink('movies')} class:list={['btn btn-sm', tab === 'movies' && 'btn-primary']}>Movies</a>
+    <a href={tabLink('tv')} class:list={['btn btn-sm', tab === 'tv' && 'btn-primary']}>TV Shows</a>
+    {
+      tab === 'movies' && (
+        <a href={`/reencode?tab=movies${showAll ? '' : '&all=1'}`} class="btn btn-sm ml-auto">
+          {showAll ? 'Hide HEVC files' : 'Show HEVC files too'}
+        </a>
+      )
+    }
+  </div>
+
+  <form method="post" class="card mb-6 overflow-x-auto">
+    <input type="hidden" name="_action" value={tab} />
+    <div class="flex flex-wrap items-end gap-3 border-b border-ink-800 p-4">
+      <div class="space-y-1">
+        <label for="mode">Run</label>
+        <select id="mode" name="mode">
+          <option value="test">Test sample (5 min)</option>
+          <option value="full">Full re-encode</option>
+        </select>
+      </div>
+      <div class="space-y-1">
+        <label for="quality">CRF</label>
+        <input id="quality" name="quality" type="number" min="10" max="35" placeholder="19 / DVD 23" class="w-28" />
+      </div>
+      <div class="space-y-1">
+        <label for="max_height">Resolution</label>
+        <select id="max_height" name="max_height">
+          <option value="">Profile default</option>
+          <option value="0">Keep source</option>
+          <option value="1080">Cap at 1080p</option>
+        </select>
+      </div>
+      <label class="flex items-center gap-2 pb-2"><input type="checkbox" name="film" /> --film</label>
+      <label class="flex items-center gap-2 pb-2"><input type="checkbox" name="force" /> include HEVC</label>
+      <button class="btn btn-primary">Queue ticked</button>
+    </div>
+
+    {
+      tab === 'movies' ? (
+        rows.length === 0 ? (
+          <p class="p-4 text-sm text-ink-500">{showAll ? 'No movie files.' : 'Every movie file is HEVC already.'}</p>
+        ) : (
+          <table class="table">
+            <thead>
+              <tr>
+                <th />
+                <th>Movie</th>
+                <th>Video</th>
+                <th>Size</th>
+                <th>Per hour</th>
+                <th>Copy</th>
+                <th />
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((f) => {
+                const busy = openByPath.get(f.relPath);
+                const isHeld = heldPaths.has(f.relPath);
+                return (
+                  <tr>
+                    <td>
+                      <input type="checkbox" name="file" value={f.relPath} disabled={!!busy || isHeld} aria-label={`Select ${f.title}`} />
+                    </td>
+                    <td>
+                      <a href={`/movie/${f.tmdbId}`} class="hover:underline">
+                        {f.title}
+                      </a>
+                      {f.year && <span class="text-ink-500"> ({f.year})</span>}
+                      <span class="block max-w-md truncate text-xs text-ink-500" title={f.relPath}>
+                        {f.relPath.split('/')[2]}
+                      </span>
+                    </td>
+                    <td class="whitespace-nowrap text-ink-300">
+                      {f.codec ?? '?'} {resolutionLabel(f.width, f.height)}
+                      {f.hdr && f.hdr !== 'none' && <span class="chip ml-1 bg-ink-700 text-ink-200">{f.hdr === 'dv' ? `DV${f.dvProfile ? ` P${f.dvProfile}` : ''}` : 'HDR10'}</span>}
+                      {f.hdr === 'dv' && (
+                        <span class="block text-xs text-amber-300" title="Dolby Vision re-encodes are verified on one title so far">
+                          test one first
+                        </span>
+                      )}
+                    </td>
+                    <td class="tabular-nums">{formatBytes(f.sizeBytes)}</td>
+                    <td class="tabular-nums">{gbh(f.bph)}</td>
+                    <td>{f.ownership && <OwnershipBadge ownership={f.ownership} />}</td>
+                    <td class="text-xs text-amber-300">{busy ? busy : isHeld ? 'original held' : ''}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )
+      ) : tvFolders.length === 0 ? (
+        <p class="p-4 text-sm text-ink-500">The server worker hasn't reported any TV Shows folders yet.</p>
+      ) : (
+        <ul class="divide-y divide-ink-850 text-sm">
+          {tvFolders.map((folder) => {
+            const season = folder.includes('/');
+            const busy = openByPath.get(`TV Shows/${folder}`);
+            return (
+              <li class:list={['flex items-center gap-3 px-4 py-1.5', season && 'pl-10']}>
+                <input type="checkbox" name="folder" value={folder} disabled={!!busy} aria-label={`Select ${folder}`} />
+                <span class:list={[!season && 'font-medium']}>{season ? folder.split('/')[1] : folder}</span>
+                {!season && <span class="text-xs text-ink-500">whole show</span>}
+                {busy && <span class="text-xs text-amber-300">{busy}</span>}
+              </li>
+            );
+          })}
+        </ul>
+      )
+    }
+  </form>
+
+  <section class="card">
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-ink-800 p-4">
+      <div>
+        <h2 class="text-lg font-semibold">Held in _replaced</h2>
+        <p class="text-sm text-ink-400">
+          {held.length ? `${held.length} file${held.length === 1 ? '' : 's'}, ${formatBytes(heldBytes)}. Check the new file in Plex, then delete the original.` : 'Nothing held.'}
+        </p>
+      </div>
+      {
+        held.length > 1 && (
+          <form method="post" onsubmit="return confirm('Delete every held file? This cannot be undone.')">
+            <input type="hidden" name="_action" value="purge_all" />
+            <button class="btn btn-sm btn-danger">Delete all held</button>
+          </form>
+        )
+      }
+    </div>
+    {
+      held.length > 0 && (
+        <table class="table">
+          <thead>
+            <tr>
+              <th>File</th>
+              <th>Held</th>
+              <th>Before → after</th>
+              <th>Since</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {held.map((h) => {
+              const busy = openByPath.get(h.relPath);
+              return (
+                <tr>
+                  <td class="max-w-md truncate" title={h.relPath}>
+                    {h.relPath.split('/').slice(1).join(' / ')}
+                  </td>
+                  <td class="text-ink-400">{h.kind === 'original' ? 'original' : 'the encode (original restored)'}</td>
+                  <td class="tabular-nums whitespace-nowrap">
+                    {formatBytes(h.oldSize)} → {formatBytes(h.newSize)}
+                  </td>
+                  <td class="tabular-nums text-ink-400">{fmt(h.since)}</td>
+                  <td class="whitespace-nowrap text-right">
+                    {busy ? (
+                      <span class="text-xs text-amber-300">{busy}</span>
+                    ) : (
+                      <div class="flex justify-end gap-2">
+                        {h.kind === 'original' && (
+                          <form method="post">
+                            <input type="hidden" name="_action" value="restore" />
+                            <input type="hidden" name="rel_path" value={h.relPath} />
+                            <button class="btn btn-sm">Restore</button>
+                          </form>
+                        )}
+                        <form method="post" onsubmit="return confirm('Delete this held file? This cannot be undone.')">
+                          <input type="hidden" name="_action" value="purge" />
+                          <input type="hidden" name="rel_path" value={h.relPath} />
+                          <button class="btn btn-sm btn-danger">Delete {h.kind === 'original' ? 'original' : 'encode'}</button>
+                        </form>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )
+    }
+  </section>
+</Layout>

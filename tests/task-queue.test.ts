@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendLog,
+  bytesPerHour,
+  heldOriginals,
+  heldParams,
+  reencodeParams,
   encodeParams,
   folderName,
   handoffParams,
@@ -117,5 +121,70 @@ describe('appendLog', () => {
     expect(long.startsWith('[… earlier output cut]\n')).toBe(true);
     expect(long.endsWith('last line\n')).toBe(true);
     expect(long.length).toBeLessThanOrEqual(LOG_LIMIT + 30);
+  });
+});
+
+describe('re-encode params', () => {
+  it('accepts a movie file and a TV season', () => {
+    expect(reencodeParams.parse({ library: 'Movies', folder: 'Heat (1995) {tmdb-949}', file: 'Heat (1995).mkv' }).mode).toBe('test');
+    expect(reencodeParams.parse({ library: 'TV Shows', folder: 'Shogun {tmdb-1}/Season 01' }).file).toBeNull();
+  });
+
+  it('refuses anything outside a library folder', () => {
+    const bad = [
+      { library: 'Music', folder: 'x' },
+      { library: 'Movies', folder: '../x' },
+      { library: 'Movies', folder: 'a/b/c' },
+      { library: 'Movies', folder: '_replaced' },
+      { library: 'Movies', folder: 'Heat', file: 'Heat.nfo' },
+      { library: 'Movies', folder: 'Heat', mode: 'dry-run' },
+    ];
+    for (const p of bad) expect(reencodeParams.safeParse(p).success, JSON.stringify(p)).toBe(false);
+  });
+
+  it('accepts only library file paths for held originals', () => {
+    expect(heldParams.safeParse({ relPath: 'Movies/Heat (1995) {tmdb-949}/Heat (1995).mkv' }).success).toBe(true);
+    expect(heldParams.safeParse({ relPath: 'TV Shows/Shogun/Season 01/E1.mkv' }).success).toBe(true);
+    for (const relPath of ['Movies/x.mkv', 'Movies/../a/b.mkv', 'Music/a/b.mkv', 'Movies/a/b.nfo', 'Movies/a/b/c/d.mkv']) {
+      expect(heldParams.safeParse({ relPath }).success, relPath).toBe(false);
+    }
+  });
+
+  it('titles the new task types', () => {
+    expect(taskTitle('reencode', { folder: 'Heat', file: 'Heat.mkv', mode: 'test' })).toBe('Re-encode: Heat.mkv (test)');
+    expect(taskTitle('reencode', { folder: 'Shogun/Season 01', file: null, mode: 'full' })).toBe('Re-encode: Shogun/Season 01');
+    expect(taskTitle('purge-original', { relPath: 'Movies/Heat/Heat.mkv' })).toBe('Delete held original: Heat.mkv');
+  });
+});
+
+describe('heldOriginals', () => {
+  const at = new Date('2026-10-03T03:00:00Z');
+  const heat = 'Movies/Heat/Heat.mkv';
+  const row = (id: number, type: string, result: Record<string, unknown> | null, status = 'done') => ({ id, type, status, finishedAt: at, result });
+
+  it('replays replace, restore and purge in task order', () => {
+    const replace = row(1, 'reencode', {
+      files: [
+        { relPath: heat, status: 'replaced', oldSize: 30, newSize: 8 },
+        { relPath: 'Movies/Up/Up.mkv', status: 'skipped', reason: 'already HEVC' },
+      ],
+    });
+    expect(heldOriginals([replace])).toEqual([{ relPath: heat, kind: 'original', oldSize: 30, newSize: 8, since: at, taskId: 1 }]);
+    expect(heldOriginals([row(2, 'restore-original', { relPath: heat }), replace])[0].kind).toBe('encode');
+    expect(heldOriginals([replace, row(2, 'purge-original', { relPath: heat })])).toEqual([]);
+  });
+
+  it('counts files a partly failed re-encode replaced, but not failed purges', () => {
+    const partly = row(1, 'reencode', { files: [{ relPath: heat, status: 'replaced', oldSize: 3, newSize: 1 }] }, 'failed');
+    expect(heldOriginals([partly])).toHaveLength(1);
+    expect(heldOriginals([partly, row(2, 'purge-original', { relPath: heat }, 'failed')])).toHaveLength(1);
+  });
+});
+
+describe('bytesPerHour', () => {
+  it('needs both size and runtime', () => {
+    expect(bytesPerHour(30 * 1024 ** 3, 7200)).toBe(15 * 1024 ** 3);
+    expect(bytesPerHour(null, 7200)).toBeNull();
+    expect(bytesPerHour(1, null)).toBeNull();
   });
 });

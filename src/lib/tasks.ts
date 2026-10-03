@@ -1,7 +1,16 @@
 import { and, asc, desc, eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client';
-import { tasks, workers, type Task, type TaskType, type Worker } from '../db/schema';
-import { appendLog, mayClaim, PARAMS, taskTitle, type ClaimRequest, type TaskUpdate } from './task-queue';
+import { files, tasks, workers, type Task, type TaskType, type Worker } from '../db/schema';
+import {
+  appendLog,
+  heldOriginals,
+  mayClaim,
+  PARAMS,
+  taskTitle,
+  type ClaimRequest,
+  type ReencodeFile,
+  type TaskUpdate,
+} from './task-queue';
 
 /** Queue a task for one worker. Throws a ZodError when the parameters are invalid. */
 export function enqueue(type: TaskType, worker: string, params: unknown, parentId: number | null = null): Task {
@@ -23,10 +32,10 @@ export function claimNext(name: string, req: ClaimRequest, now = new Date()): Ta
   return db.transaction((tx) => {
     const worker = tx
       .insert(workers)
-      .values({ name, capabilities: req.capabilities, inventory: req.inventory, lastSeenAt: now })
+      .values({ name, capabilities: req.capabilities, inventory: req.inventory, libraries: req.libraries, lastSeenAt: now })
       .onConflictDoUpdate({
         target: workers.name,
-        set: { capabilities: req.capabilities, inventory: req.inventory, lastSeenAt: now },
+        set: { capabilities: req.capabilities, inventory: req.inventory, libraries: req.libraries, lastSeenAt: now },
       })
       .returning()
       .get();
@@ -74,17 +83,72 @@ export function updateTask(id: number, u: TaskUpdate, now = new Date()) {
   if (u.log) set.log = appendLog(task.log, u.log);
   if (u.exitCode !== undefined) set.exitCode = u.exitCode;
   if (u.error !== undefined) set.error = u.error;
+  if (u.result !== undefined) set.result = u.result;
   if (u.status === 'done' || u.status === 'failed') {
     set.status = u.status === 'failed' && task.cancelRequested ? 'cancelled' : u.status;
     set.finishedAt = now;
   }
   const updated = db.update(tasks).set(set).where(eq(tasks.id, id)).returning().get();
 
+  if (updated.type === 'reencode' && u.result) applyReencode(u.result);
+  if (updated.type === 'restore-original' && updated.status === 'done') applyRestore(updated.params.relPath as string, updated.id);
+
   if (updated.status === 'done' && updated.type === 'handoff') {
     const then = (updated.params as { then?: Record<string, unknown> | null }).then;
     if (then) enqueue('encode', 'server', { ...then, folder: updated.params.folder }, updated.id);
   }
   return { task: updated, cancel: updated.cancelRequested };
+}
+
+/**
+ * A replaced file keeps its path, so its row and copy link stay; update what
+ * changed now instead of waiting for the next Plex scan (which refreshes the
+ * rest by path). TV files are not in the tracker, so they simply don't match.
+ */
+function applyReencode(result: Record<string, unknown>) {
+  for (const f of (result.files as ReencodeFile[] | undefined) ?? []) {
+    if (f.status !== 'replaced' || !f.newSize) continue;
+    db.update(files).set({ codec: 'hevc', sizeBytes: f.newSize }).where(eq(files.relPath, f.relPath)).run();
+  }
+}
+
+/**
+ * The original is back under the same path: its size is known from the
+ * re-encode, its codec isn't, so clear that for the next Plex scan to fill in
+ * (meanwhile the file shows up again as a re-encode candidate, which it is).
+ */
+function applyRestore(relPath: string, restoreTaskId: number) {
+  const before = heldOriginals(
+    db
+      .select({ id: tasks.id, type: tasks.type, status: tasks.status, finishedAt: tasks.finishedAt, result: tasks.result })
+      .from(tasks)
+      .where(inArray(tasks.type, ['reencode', 'purge-original', 'restore-original']))
+      .all()
+      .filter((t) => t.id < restoreTaskId),
+  ).find((h) => h.relPath === relPath);
+  db.update(files)
+    .set({ codec: null, ...(before?.oldSize ? { sizeBytes: before.oldSize } : {}) })
+    .where(eq(files.relPath, relPath))
+    .run();
+}
+
+/** Originals currently held in _replaced, from the results of finished tasks. */
+export function listHeldOriginals() {
+  const rows = db
+    .select({ id: tasks.id, type: tasks.type, status: tasks.status, finishedAt: tasks.finishedAt, result: tasks.result })
+    .from(tasks)
+    .where(inArray(tasks.type, ['reencode', 'purge-original', 'restore-original']))
+    .all();
+  return heldOriginals(rows);
+}
+
+/** Re-encode-related tasks not finished yet, for marking rows as in progress. */
+export function openReencodeTasks(): Task[] {
+  return db
+    .select()
+    .from(tasks)
+    .where(and(inArray(tasks.type, ['reencode', 'purge-original', 'restore-original']), inArray(tasks.status, ['queued', 'running'])))
+    .all();
 }
 
 /** A queued task is dropped at once; a running one is told to stop on its next report. */
